@@ -2,9 +2,15 @@
 
 ## Project Structure & Module Organization
 - `dataloader.py`: Core module for discovering raw MM-Fi samples, validating frame alignment, building split indices, cleaning CSI features, packing one HDF5 dataset, loading HDF5 splits, creating PyTorch `DataLoader` instances, and previewing split contents.
+- `baseline_common.py`: Shared training and evaluation helpers such as metric aggregation, checkpoint config handling, dataloader construction, and device selection.
+- `models/`: Baseline model package. The current baseline is a frame-level `LSTM + Transformer` regressor for MM-Fi pose estimation.
+- `train.py`: Training entrypoint for Linux-server experiments, including logging, early stopping, checkpointing, and test-set evaluation after the best validation checkpoint is selected.
+- `eval.py`: Evaluation entrypoint for loading one checkpoint, computing metrics on one split, and saving prediction-vs-target visualizations.
 - `scripts/build_h5_dataset.py`: Command-line wrapper that packs the raw MM-Fi directory tree into one `.h5` or `.hdf5` dataset file.
+- `tests/`: `pytest` tests for baseline model shape checks and CLI parsing.
+- `.gitignore`: Excludes Python caches, pytest caches, local packed data, and generated experiment outputs.
 
-This repository is a small baseline subproject focused on dataset preparation and inspection only. It does not currently include model, training, evaluation, or test modules.
+This repository is a small baseline subproject focused on code authoring on the local machine and training or evaluation execution on a Linux server. The local machine should only modify and verify code lightly; heavy training, validation, testing runs, and result generation belong on Linux.
 
 Generated datasets can be large and should not be committed. Keep raw dataset roots outside the repository.
 
@@ -20,6 +26,8 @@ The repository currently uses these physical features:
 - `csi_amplitude`: cleaned CSI amplitude. Non-finite values are replaced with frame-local finite bounds, then normalized with train-split global min-max statistics when loaded from raw-storage HDF5.
 - `csi_phase`: cleaned CSI phase. The pipeline interpolates non-finite subcarrier values, unwraps phase along the subcarrier axis, and removes the per-antenna linear trend.
 - `csi_phase_cos`: cosine-transformed cleaned phase for a bounded phase feature.
+
+The current baseline model uses `csi_amplitude` and `csi_phase_cos` as inputs and predicts normalized `(17, 2)` keypoints for one frame at a time.
 
 One packed HDF5 stores:
 - frame-level `keypoints`, `csi_amplitude`, `csi_phase`, `csi_phase_cos`
@@ -52,17 +60,49 @@ Inspect the alternate frame-random split scheme:
 python dataloader.py --dataset-root data\mmfi_pose.h5 --split-scheme frame_random --preview
 ```
 
+Train the baseline model on Linux with the stricter sample-level split:
+
+```powershell
+python train.py --dataset-root /data/WiFiPose/dataset/mmfi_pose.h5 --split-scheme action_env --epochs 60 --batch-size 128 --output-dir outputs/action_env_baseline
+```
+
+Train the baseline model on Linux with the frame-random comparison split:
+
+```powershell
+python train.py --dataset-root /data/WiFiPose/dataset/mmfi_pose.h5 --split-scheme frame_random --epochs 60 --batch-size 128 --output-dir outputs/frame_random_baseline
+```
+
+Run a tiny overfit or sanity check on Linux:
+
+```powershell
+python train.py --dataset-root /data/WiFiPose/dataset/mmfi_pose.h5 --split-scheme action_env --subset-size 512 --epochs 80 --output-dir outputs/tiny_overfit
+```
+
+Evaluate one checkpoint and save metrics plus visualizations:
+
+```powershell
+python eval.py --dataset-root /data/WiFiPose/dataset/mmfi_pose.h5 --checkpoint outputs/action_env_baseline/best_val_mpjpe.pth --output-dir outputs/eval_action_env
+```
+
+Run lightweight local verification:
+
+```powershell
+pytest
+```
+
 ## Coding Style & Naming Conventions
 Use Python 3.10+ syntax, type hints, and `pathlib.Path` for paths. Group imports as standard library, third-party, then local. Follow existing naming: `snake_case` functions and variables, `PascalCase` classes, and uppercase constants such as `SPLIT_NAMES` or `CSI_SHAPE`. Use 4-space indentation. Keep comments focused on dataset assumptions, tensor shapes, alignment constraints, and normalization or cleaning behavior.
 
 ## Testing Guidelines
-Automated tests are not present yet in this subproject. When adding tests, use `pytest`, name files `test_*.py`, and keep fixtures synthetic and small. Prioritize coverage for raw-directory discovery, frame-count validation, frame-name alignment, HDF5 round-tripping, split generation, shape validation, and CSI cleaning or normalization edge cases.
+Automated tests use `pytest`. Keep fixtures synthetic and small on the local machine. Prioritize coverage for baseline model output shapes, CLI parsing, raw-directory discovery, frame-count validation, frame-name alignment, HDF5 round-tripping, split generation, shape validation, and CSI cleaning or normalization edge cases.
+
+Local verification should stay lightweight. Do not run long training jobs on the local machine. Use the Linux server for full training, overfit checks on real data, validation, evaluation, and artifact generation.
 
 ## Commit & Pull Request Guidelines
 Use concise imperative commits, for example `Update AGENTS for baseline dataset project`. Pull requests should include a summary, commands run, dataset assumptions, and any relevant tensor-shape or frame-count output. Do not commit generated datasets, virtual environments, or machine-specific paths.
 
 ## Security & Configuration Tips
-Do not hard-code private dataset locations beyond documented defaults. Pass dataset paths with `--dataset-root` and keep large or sensitive data outside version control.
+Do not hard-code private dataset locations beyond documented defaults. Pass dataset paths with `--dataset-root` and keep large or sensitive data outside version control. Prefer Linux-server paths in training and evaluation commands, and keep local Windows paths out of committed experiment configs when possible.
 
 ## Agent-Specific Instructions
 Write repository-facing agent notes, documentation, and code comments in English. Keep comments aligned with surrounding style. Use Chinese for conversational replies unless the user requests another language.
