@@ -280,6 +280,13 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
                 )
             )
             csv_file.flush()
+            tqdm.write(
+                f"[Epoch {epoch}/{args.epochs}] "
+                f"train_loss={train_metrics['loss']:.6f} "
+                f"val_loss={val_metrics['loss']:.6f} "
+                f"train_pck@20={train_metrics['pck_0.20']:.6f} "
+                f"val_pck@20={val_metrics['pck_0.20']:.6f}"
+            )
             epoch_progress.set_postfix(
                 train_mpjpe=f"{train_metrics['mpjpe']:.2f}",
                 val_mpjpe=f"{val_metrics['mpjpe']:.2f}",
