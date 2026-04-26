@@ -2,10 +2,10 @@
 
 ## Project Structure & Module Organization
 - `dataloader.py`: Core module for discovering raw MM-Fi samples, validating frame alignment, building split indices, cleaning CSI features, packing one HDF5 dataset, loading HDF5 splits, creating PyTorch `DataLoader` instances, and previewing split contents.
-- `baseline_common.py`: Shared training and evaluation helpers such as metric aggregation, checkpoint config handling, dataloader construction, and device selection.
-- `models/`: Baseline model package. The current baseline is a frame-level `LSTM + Transformer` regressor for MM-Fi pose estimation.
-- `train.py`: Training entrypoint for Linux-server experiments, including `tqdm` epoch visualization, readable CSV logging, early stopping, checkpointing, and test-set evaluation after the best validation checkpoint is selected.
-- `eval.py`: Evaluation entrypoint for loading one checkpoint, computing metrics on one split, and saving one CSI-plus-skeleton visualization for each `(action, environment)` group in the evaluated split.
+- `baseline_common.py`: Shared training and evaluation helpers such as sequence loss computation, pixel-space metrics, checkpoint config handling, dataloader construction, and device selection.
+- `models/`: Baseline model package. The current baseline is a sequence-level CSI pose regressor with a frame CNN encoder, a 2-layer BiGRU temporal encoder, and a joint-query pose decoder.
+- `train.py`: Training entrypoint for Linux-server experiments, including `tqdm` epoch visualization, readable CSV logging, structured pose/bone/temporal losses, early stopping, checkpointing, and test-set evaluation after the best validation checkpoint is selected.
+- `eval.py`: Evaluation entrypoint for loading one checkpoint, computing pixel-space test metrics, and saving middle-frame CSI/skeleton visualizations for each `(action, environment)` group in the evaluated split.
 - `scripts/build_h5_dataset.py`: Command-line wrapper that packs the raw MM-Fi directory tree into one `.h5` or `.hdf5` dataset file.
 - `tests/`: `pytest` tests for baseline model shape checks and CLI parsing.
 - `.gitignore`: Excludes Python caches, pytest caches, local packed data, and generated experiment outputs.
@@ -27,7 +27,7 @@ The repository currently uses these physical features:
 - `csi_phase`: cleaned CSI phase. The pipeline interpolates non-finite subcarrier values, unwraps phase along the subcarrier axis, and removes the per-antenna linear trend.
 - `csi_phase_cos`: cosine-transformed cleaned phase for a bounded phase feature.
 
-The current baseline model uses `csi_amplitude` and `csi_phase_cos` as inputs and predicts normalized `(17, 2)` keypoints for one frame at a time.
+The current baseline model uses `csi_amplitude` and `csi_phase_cos` as inputs. It groups frame-level HDF5 records into contiguous windows and predicts normalized `(17, 2)` keypoints for every frame in the window.
 
 One packed HDF5 stores:
 - frame-level `keypoints`, `csi_amplitude`, `csi_phase`, `csi_phase_cos`
@@ -63,24 +63,34 @@ python dataloader.py --dataset-root data\mmfi_pose.h5 --split-scheme frame_rando
 Train the baseline model on Linux with the stricter sample-level split:
 
 ```powershell
-python train.py --dataset-root /data/WiFiPose/dataset/mmfi_pose.h5 --split-scheme action_env --epochs 60 --batch-size 128 --output-dir outputs/action_env_baseline
+python train.py --dataset-root /data/WiFiPose/dataset/mmfi_pose.h5 --split-scheme action_env --window-size 16 --window-stride 4 --epochs 60 --batch-size 64 --output-dir outputs/action_env_sequence
 ```
 
 Train the baseline model on Linux with the frame-random comparison split:
 
 ```powershell
-python train.py --dataset-root /data/WiFiPose/dataset/mmfi_pose.h5 --split-scheme frame_random --epochs 60 --batch-size 128 --output-dir outputs/frame_random_baseline
+python train.py --dataset-root /data/WiFiPose/dataset/mmfi_pose.h5 --split-scheme frame_random --window-size 16 --window-stride 4 --epochs 60 --batch-size 64 --output-dir outputs/frame_random_sequence
 ```
 
 Evaluate one checkpoint and save metrics plus per-`(action, environment)` visualizations:
 
 ```powershell
-python eval.py --dataset-root /data/WiFiPose/dataset/mmfi_pose.h5 --checkpoint outputs/action_env_baseline/best_val_mpjpe.pth --output-dir outputs/eval_action_env
+python eval.py --dataset-root /data/WiFiPose/dataset/mmfi_pose.h5 --checkpoint outputs/action_env_sequence/best_val_mpjpe.pth --output-dir outputs/eval_action_env_sequence
 ```
 
 The evaluation script writes one `.png` file for each `(action, environment)` combination covered by the evaluated split. For the standard MM-Fi `action_env` setup this means `27 x 4 = 108` visualization images under `output_dir/visualizations/`.
 
-Training logs are written to `train_log.csv` with one row per epoch. The log includes grouped train and validation metrics, elapsed time, the current best validation MPJPE, an `is_best` marker, and the current early-stopping counter.
+Training logs are written to `train_log.csv` with one row per epoch. The log includes grouped train and validation loss parts, pixel-space `MPJPE`, pixel-space `PCK@10px`, `PCK@20px`, `PCK@30px`, elapsed time, the current best validation MPJPE, an `is_best` marker, and the current early-stopping counter.
+
+## Current Baseline Design
+- Input shape: `B x T x 2 x 3 x 114 x 10`, where the two modalities are normalized amplitude and cosine-transformed phase.
+- Default sequence window: `T=16`, `window_stride=4`. Windows never cross `(action, sample, environment)` boundaries.
+- Frame CSI encoder: three `Conv2d + BatchNorm2d + ReLU` blocks over `subcarrier x CSI time shot`, followed by global average pooling and a linear projection.
+- Temporal encoder: 2-layer bidirectional GRU over the frame window.
+- Pose decoder: 17 learnable COCO joint queries, one per keypoint, concatenated with each temporal feature before shared MLP coordinate regression.
+- Output shape: `B x T x 17 x 2` in the existing `[0, 1]` keypoint normalization space.
+- Loss: `SmoothL1` pose loss plus `0.1` bone-length loss and `0.05` temporal-delta loss.
+- Metrics: pixel-space `MPJPE` and pixel-space PCK thresholds. Do not use the old normalized-coordinate `PCK@0.05/0.10/0.20` for reporting.
 
 Run lightweight local verification:
 

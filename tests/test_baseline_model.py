@@ -7,10 +7,9 @@ from models import BaselineLSTMTransformer, BaselineModelConfig
 
 def test_baseline_model_forward_shape() -> None:
     model = BaselineLSTMTransformer(BaselineModelConfig())
-    csi_amplitude = torch.randn(4, 3, 114, 10)
-    csi_phase_cos = torch.randn(4, 3, 114, 10)
+    csi_window = torch.randn(2, 16, 2, 3, 114, 10)
 
-    output = model(csi_amplitude, csi_phase_cos)
+    output = model(csi_window)
 
-    assert output.shape == (4, 17, 2)
+    assert output.shape == (2, 16, 17, 2)
     assert torch.isfinite(output).all()

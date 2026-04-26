@@ -14,9 +14,10 @@ from scipy.io import loadmat
 from tqdm import tqdm
 
 try:
-    from torch.utils.data import DataLoader
+    from torch.utils.data import DataLoader, Dataset
 except ImportError:  # pragma: no cover - handled at runtime when torch is unavailable.
     DataLoader = None
+    Dataset = object
 
 
 # Basic parameters setting, containing root path, split setting and shape etc.
@@ -635,7 +636,7 @@ def build_h5_dataset(
     }
 
 
-class MMFiPoseDataset:
+class MMFiPoseDataset(Dataset):
     """Frame-level HDF5 dataset that returns aligned pose labels and CSI tensors."""
 
     def __init__(self, dataset_root: str | Path, split: str, split_scheme: str = DEFAULT_SPLIT_SCHEME) -> None:
@@ -739,6 +740,149 @@ class MMFiPoseDataset:
             "csi_amplitude": csi_amplitude,
             "csi_phase": np.asarray(h5_file["csi_phase"][frame_index], dtype=np.float32),
             "csi_phase_cos": np.asarray(h5_file["csi_phase_cos"][frame_index], dtype=np.float32),
+        }
+
+
+def _frame_number(frame_id: str) -> int:
+    """Extract the numeric part of a frame id such as ``frame001``."""
+
+    digits = "".join(character for character in frame_id if character.isdigit())
+    if not digits:
+        raise ValueError(f"Frame id does not contain a numeric suffix: {frame_id}")
+    return int(digits)
+
+
+class MMFiPoseSequenceDataset(Dataset):
+    """Windowed HDF5 dataset for sequence-level pose regression.
+
+    The packed HDF5 file is frame-level. This wrapper builds contiguous windows
+    from frames that share the same action, sample, and environment, then loads
+    the CSI and pose tensors for one full window at a time.
+    """
+
+    def __init__(
+        self,
+        dataset_root: str | Path,
+        split: str,
+        split_scheme: str = DEFAULT_SPLIT_SCHEME,
+        window_size: int = 16,
+        window_stride: int = 4,
+    ) -> None:
+        if window_size <= 0:
+            raise ValueError(f"window_size must be positive, got {window_size}")
+        if window_stride <= 0:
+            raise ValueError(f"window_stride must be positive, got {window_stride}")
+
+        self.frame_dataset = MMFiPoseDataset(
+            dataset_root=dataset_root,
+            split=split,
+            split_scheme=split_scheme,
+        )
+        self.dataset_root = self.frame_dataset.dataset_root
+        self.split = split
+        self.split_scheme = split_scheme
+        self.window_size = int(window_size)
+        self.window_stride = int(window_stride)
+        self.keypoint_x_scale = self.frame_dataset.keypoint_x_scale
+        self.keypoint_y_scale = self.frame_dataset.keypoint_y_scale
+        self.windows = self._build_windows()
+
+        if not self.windows:
+            raise ValueError(
+                "No contiguous sequence windows were found. "
+                f"split={split!r}, split_scheme={split_scheme!r}, "
+                f"window_size={window_size}, window_stride={window_stride}"
+            )
+
+    def _build_windows(self) -> list[tuple[int, ...]]:
+        """Build contiguous windows without crossing sample boundaries."""
+
+        grouped_frames: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
+        with h5py.File(self.dataset_root, "r") as h5_file:
+            for frame_index in self.frame_dataset.indices:
+                frame_index = int(frame_index)
+                action = _decode_string(h5_file["action"][frame_index])
+                sample = _decode_string(h5_file["sample"][frame_index])
+                environment = _decode_string(h5_file["environment"][frame_index])
+                frame_id = _decode_string(h5_file["frame_id"][frame_index])
+                group_key = (action, sample, environment)
+                grouped_frames.setdefault(group_key, []).append((_frame_number(frame_id), frame_index))
+
+        windows: list[tuple[int, ...]] = []
+        for frames in grouped_frames.values():
+            ordered_frames = sorted(frames, key=lambda item: item[0])
+            frame_numbers = [frame_number for frame_number, _ in ordered_frames]
+            frame_indices = [frame_index for _, frame_index in ordered_frames]
+
+            for start in range(0, len(frame_indices) - self.window_size + 1, self.window_stride):
+                number_slice = frame_numbers[start : start + self.window_size]
+                expected = list(range(number_slice[0], number_slice[0] + self.window_size))
+                if number_slice == expected:
+                    windows.append(tuple(frame_indices[start : start + self.window_size]))
+
+        return windows
+
+    def __len__(self) -> int:
+        return len(self.windows)
+
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        state["frame_dataset"] = self.frame_dataset.__getstate__()
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        frame_dataset_state = state.pop("frame_dataset")
+        self.__dict__.update(state)
+        self.frame_dataset = MMFiPoseDataset(
+            dataset_root=self.dataset_root,
+            split=self.split,
+            split_scheme=self.split_scheme,
+        )
+        self.frame_dataset.__dict__.update(frame_dataset_state)
+
+    def close(self) -> None:
+        self.frame_dataset.close()
+
+    def __del__(self) -> None:  # pragma: no cover - best-effort cleanup.
+        self.close()
+
+    def __getitem__(self, index: int) -> Dict[str, np.ndarray | str]:
+        """Load one contiguous sequence window."""
+
+        h5_file = self.frame_dataset._get_h5_file()
+        window_indices = self.windows[index]
+        keypoints: list[np.ndarray] = []
+        csi_amplitude: list[np.ndarray] = []
+        csi_phase_cos: list[np.ndarray] = []
+
+        for frame_index in window_indices:
+            frame_keypoints = np.asarray(h5_file["keypoints"][frame_index], dtype=np.float32)
+            frame_amplitude = np.asarray(h5_file["csi_amplitude"][frame_index], dtype=np.float32)
+            if self.frame_dataset.storage_format == RAW_STORAGE_ATTR:
+                frame_keypoints = _normalize_keypoints(
+                    frame_keypoints,
+                    x_scale=self.keypoint_x_scale,
+                    y_scale=self.keypoint_y_scale,
+                )
+                frame_amplitude = _normalize_csi_amplitude(
+                    frame_amplitude,
+                    train_min=self.frame_dataset.amplitude_train_min,
+                    train_max=self.frame_dataset.amplitude_train_max,
+                )
+
+            keypoints.append(frame_keypoints)
+            csi_amplitude.append(frame_amplitude)
+            csi_phase_cos.append(np.asarray(h5_file["csi_phase_cos"][frame_index], dtype=np.float32))
+
+        middle_index = window_indices[len(window_indices) // 2]
+        return {
+            "action": _decode_string(h5_file["action"][middle_index]),
+            "sample": _decode_string(h5_file["sample"][middle_index]),
+            "environment": _decode_string(h5_file["environment"][middle_index]),
+            "frame_id": _decode_string(h5_file["frame_id"][middle_index]),
+            "keypoints": np.stack(keypoints).astype(np.float32),
+            "csi_amplitude": np.stack(csi_amplitude).astype(np.float32),
+            "csi_phase_cos": np.stack(csi_phase_cos).astype(np.float32),
         }
 
 

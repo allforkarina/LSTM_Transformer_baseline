@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Evaluation entrypoint for the frame-level MM-Fi LSTM + Transformer baseline."""
+"""Evaluation entrypoint for the sequence-level MM-Fi CSI pose baseline."""
 
 import argparse
 import json
@@ -8,20 +8,21 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch import nn
 
 from baseline_common import (
-    PCK_THRESHOLDS,
+    PCK_PIXEL_THRESHOLDS,
+    PoseSequenceLoss,
     build_dataloader,
     build_model,
     ensure_output_dir,
     get_dataset_scales,
     model_config_from_dict,
     move_batch_to_device,
+    normalized_to_pixels,
     resolve_device,
     run_epoch,
 )
-from dataloader import MMFiPoseDataset
+from dataloader import MMFiPoseSequenceDataset
 
 
 COCO_KEYPOINT_COLORS = (
@@ -68,17 +69,11 @@ COCO_SKELETON = (
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser for baseline evaluation."""
 
-    parser = argparse.ArgumentParser(description="Evaluate the MM-Fi LSTM + Transformer baseline")
+    parser = argparse.ArgumentParser(description="Evaluate the MM-Fi sequence CSI pose baseline")
     parser.add_argument("--dataset-root", type=str, required=True, help="Path to one HDF5 dataset file")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to one saved training checkpoint")
     parser.add_argument("--output-dir", type=str, required=True, help="Directory for evaluation outputs")
-    parser.add_argument(
-        "--split",
-        type=str,
-        default="test",
-        choices=("train", "val", "test"),
-        help="Dataset split to evaluate",
-    )
+    parser.add_argument("--split", type=str, default="test", choices=("train", "val", "test"), help="Dataset split")
     parser.add_argument(
         "--split-scheme",
         type=str,
@@ -86,7 +81,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=("action_env", "frame_random"),
         help="Override the split scheme stored in the checkpoint config",
     )
-    parser.add_argument("--batch-size", type=int, default=128, help="Mini-batch size")
+    parser.add_argument("--window-size", type=int, default=None, help="Override checkpoint window size")
+    parser.add_argument("--window-stride", type=int, default=None, help="Override checkpoint window stride")
+    parser.add_argument("--batch-size", type=int, default=64, help="Mini-batch size")
     parser.add_argument("--num-workers", type=int, default=0, help="Number of PyTorch dataloader workers")
     parser.add_argument("--device", type=str, default="auto", help="Runtime device, for example auto, cuda, or cpu")
     return parser
@@ -96,12 +93,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments for evaluation."""
 
     return build_arg_parser().parse_args(argv)
-
-
-def _decode_h5_string(value: str | bytes) -> str:
-    """Decode one HDF5 string scalar into a plain Python string."""
-
-    return value.decode("utf-8") if isinstance(value, bytes) else str(value)
 
 
 def _normalize_heatmap(csi_heatmap: np.ndarray) -> np.ndarray:
@@ -135,7 +126,7 @@ def _build_csi_heatmap(csi_amplitude: np.ndarray) -> np.ndarray:
 
 
 def _compute_pose_limits(target_pose: np.ndarray, prediction_pose: np.ndarray) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Compute one shared plotting window for the target and predicted poses."""
+    """Compute one shared plotting window for target and predicted poses."""
 
     combined_pose = np.concatenate((target_pose, prediction_pose), axis=0)
     finite_mask = np.isfinite(combined_pose).all(axis=1)
@@ -188,32 +179,31 @@ def _draw_pose(axis, pose: np.ndarray, title: str, x_limits: tuple[float, float]
     axis.axis("off")
 
 
-def _expected_visualization_groups(dataset: MMFiPoseDataset) -> list[tuple[str, str]]:
-    """Read the current split coverage and return sorted ``(action, environment)`` pairs."""
+def _expected_visualization_groups(dataset: MMFiPoseSequenceDataset) -> list[tuple[str, str]]:
+    """Return sorted ``(action, environment)`` pairs covered by sequence windows."""
 
-    h5_file = dataset._get_h5_file()
-    action_dataset = h5_file["action"]
-    environment_dataset = h5_file["environment"]
-    groups = {
-        (
-            _decode_h5_string(action_dataset[int(frame_index)]),
-            _decode_h5_string(environment_dataset[int(frame_index)]),
-        )
-        for frame_index in dataset.indices
-    }
+    groups: set[tuple[str, str]] = set()
+    h5_file = dataset.frame_dataset._get_h5_file()
+    for window in dataset.windows:
+        middle_index = window[len(window) // 2]
+        action = h5_file["action"][middle_index]
+        environment = h5_file["environment"][middle_index]
+        action = action.decode("utf-8") if isinstance(action, bytes) else str(action)
+        environment = environment.decode("utf-8") if isinstance(environment, bytes) else str(environment)
+        groups.add((action, environment))
     return sorted(groups)
 
 
 def _save_visualizations(
-    model: nn.Module,
+    model: torch.nn.Module,
     dataloader,
     device: torch.device,
     output_dir: Path,
     x_scale: float,
     y_scale: float,
-    dataset: MMFiPoseDataset,
+    dataset: MMFiPoseSequenceDataset,
 ) -> dict[str, object]:
-    """Save one CSI-plus-skeleton figure for each ``(action, environment)`` group."""
+    """Save one middle-frame CSI-plus-skeleton figure per ``(action, environment)``."""
 
     try:
         import matplotlib
@@ -221,37 +211,31 @@ def _save_visualizations(
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError as error:  # pragma: no cover - depends on optional runtime package.
-        raise ImportError(
-            "matplotlib is required to save evaluation visualizations."
-        ) from error
+        raise ImportError("matplotlib is required to save evaluation visualizations.") from error
 
     visualization_dir = output_dir / "visualizations"
     visualization_dir.mkdir(parents=True, exist_ok=True)
     expected_groups = _expected_visualization_groups(dataset)
-    selected_groups: list[str] = []
     saved_groups: set[tuple[str, str]] = set()
-    scale = torch.tensor((x_scale, y_scale), device=device, dtype=torch.float32).view(1, 1, 2)
+    selected_groups: list[str] = []
     model.eval()
 
     with torch.no_grad():
         for batch in dataloader:
-            csi_amplitude, csi_phase_cos, targets = move_batch_to_device(batch, device)
-            predictions = model(csi_amplitude, csi_phase_cos)
-            prediction_pixels = (predictions * scale).detach().cpu().numpy()
-            target_pixels = (targets * scale).detach().cpu().numpy()
-            actions = batch["action"]
-            samples = batch["sample"]
-            environments = batch["environment"]
-            frame_ids = batch["frame_id"]
-            heatmaps = csi_amplitude.detach().cpu().numpy()
+            csi_window, targets = move_batch_to_device(batch, device)
+            predictions = model(csi_window)
+            prediction_pixels = normalized_to_pixels(predictions, x_scale, y_scale).detach().cpu().numpy()
+            target_pixels = normalized_to_pixels(targets, x_scale, y_scale).detach().cpu().numpy()
+            heatmaps = batch["csi_amplitude"].detach().cpu().numpy()
+            middle = heatmaps.shape[1] // 2
 
             for index in range(prediction_pixels.shape[0]):
-                group = (str(actions[index]), str(environments[index]))
+                group = (str(batch["action"][index]), str(batch["environment"][index]))
                 if group in saved_groups:
                     continue
 
-                x_limits, y_limits = _compute_pose_limits(target_pixels[index], prediction_pixels[index])
-                normalized_heatmap = _normalize_heatmap(_build_csi_heatmap(heatmaps[index]))
+                x_limits, y_limits = _compute_pose_limits(target_pixels[index, middle], prediction_pixels[index, middle])
+                normalized_heatmap = _normalize_heatmap(_build_csi_heatmap(heatmaps[index, middle]))
                 figure, axes = plt.subplots(
                     nrows=3,
                     ncols=1,
@@ -260,35 +244,21 @@ def _save_visualizations(
                     gridspec_kw={"height_ratios": (1.1, 1.0, 1.0)},
                 )
                 heatmap_axis, target_axis, prediction_axis = axes
-                image = heatmap_axis.imshow(
-                    normalized_heatmap,
-                    aspect="auto",
-                    origin="lower",
-                    cmap="jet",
-                )
+                image = heatmap_axis.imshow(normalized_heatmap, aspect="auto", origin="lower", cmap="jet")
                 heatmap_axis.set_title(
-                    f"{actions[index]} {samples[index]} {environments[index]} {frame_ids[index]}"
+                    f"{batch['action'][index]} {batch['sample'][index]} "
+                    f"{batch['environment'][index]} {batch['frame_id'][index]}"
                 )
-                heatmap_axis.set_xlabel("Time step")
+                heatmap_axis.set_xlabel("CSI time shot")
                 heatmap_axis.set_ylabel("Antenna/Subcarrier")
                 figure.colorbar(image, ax=heatmap_axis, fraction=0.046, pad=0.04, label="Normalized amplitude")
+                _draw_pose(target_axis, target_pixels[index, middle], "Ground Truth", x_limits, y_limits)
+                _draw_pose(prediction_axis, prediction_pixels[index, middle], "Prediction", x_limits, y_limits)
 
-                _draw_pose(
-                    target_axis,
-                    target_pixels[index],
-                    title="Ground Truth",
-                    x_limits=x_limits,
-                    y_limits=y_limits,
+                file_name = (
+                    f"{batch['action'][index]}_{batch['environment'][index]}_"
+                    f"{batch['sample'][index]}_{batch['frame_id'][index]}.png"
                 )
-                _draw_pose(
-                    prediction_axis,
-                    prediction_pixels[index],
-                    title="Prediction",
-                    x_limits=x_limits,
-                    y_limits=y_limits,
-                )
-
-                file_name = f"{actions[index]}_{environments[index]}_{samples[index]}_{frame_ids[index]}.png"
                 figure.tight_layout()
                 figure.savefig(visualization_dir / file_name, dpi=150)
                 plt.close(figure)
@@ -306,7 +276,7 @@ def _save_visualizations(
         if (action, environment) not in saved_groups
     ]
     return {
-        "visualization_mode": "per_action_environment",
+        "visualization_mode": "per_action_environment_middle_frame",
         "num_visualizations_saved": len(saved_groups),
         "selected_groups": selected_groups,
         "missing_groups": missing_groups,
@@ -314,7 +284,7 @@ def _save_visualizations(
 
 
 def main(argv: list[str] | None = None) -> dict[str, float]:
-    """Evaluate one saved baseline checkpoint on a requested split."""
+    """Evaluate one saved sequence baseline checkpoint."""
 
     args = parse_args(argv)
     device = resolve_device(args.device)
@@ -323,17 +293,27 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
     checkpoint = torch.load(args.checkpoint, map_location=device)
     checkpoint_config = checkpoint.get("config", {})
     split_scheme = args.split_scheme or checkpoint_config.get("split_scheme", "action_env")
+    window_size = args.window_size or int(checkpoint_config.get("window_size", 16))
+    window_stride = args.window_stride or int(checkpoint_config.get("window_stride", 4))
     model_config = model_config_from_dict(checkpoint_config["model"])
 
-    # Evaluation reuses the same split statistics that were written into the HDF5 file
-    # so metrics stay consistent with training-time normalization.
-    dataset = MMFiPoseDataset(dataset_root=args.dataset_root, split=args.split, split_scheme=split_scheme)
+    dataset = MMFiPoseSequenceDataset(
+        dataset_root=args.dataset_root,
+        split=args.split,
+        split_scheme=split_scheme,
+        window_size=window_size,
+        window_stride=window_stride,
+    )
     dataloader = build_dataloader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     x_scale, y_scale = get_dataset_scales(dataset)
 
     model = build_model(model_config).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
-    criterion = nn.SmoothL1Loss(beta=float(checkpoint_config.get("smooth_l1_beta", 0.02)))
+    criterion = PoseSequenceLoss(
+        beta=float(checkpoint_config.get("smooth_l1_beta", 0.02)),
+        bone_weight=float(checkpoint_config.get("bone_loss_weight", 0.1)),
+        temporal_weight=float(checkpoint_config.get("temporal_loss_weight", 0.05)),
+    )
     metrics = run_epoch(
         model,
         dataloader,
@@ -348,12 +328,15 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
         "checkpoint": args.checkpoint,
         "split": args.split,
         "split_scheme": split_scheme,
+        "window_size": window_size,
+        "window_stride": window_stride,
+        "num_windows": len(dataset),
         "batch_size": args.batch_size,
         "device": str(device),
         "metrics": metrics,
-        "pck_thresholds": list(PCK_THRESHOLDS),
+        "pck_pixel_thresholds": list(PCK_PIXEL_THRESHOLDS),
     }
-    visualization_summary = _save_visualizations(
+    metrics_payload["visualizations"] = _save_visualizations(
         model=model,
         dataloader=dataloader,
         device=device,
@@ -362,7 +345,6 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
         y_scale=y_scale,
         dataset=dataset,
     )
-    metrics_payload["visualizations"] = visualization_summary
     (output_dir / "eval_metrics.json").write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
     return metrics
 

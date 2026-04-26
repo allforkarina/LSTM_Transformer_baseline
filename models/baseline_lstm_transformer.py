@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Baseline LSTM + Transformer model for frame-level MM-Fi pose regression."""
+"""Sequence-level CSI pose model with a CNN frame encoder and joint queries."""
 
 from dataclasses import dataclass
 
@@ -10,145 +10,141 @@ from torch import nn
 
 @dataclass(frozen=True)
 class BaselineModelConfig:
-    """Fixed model configuration for the first baseline implementation."""
+    """Configuration for the sequence-level MM-Fi pose baseline."""
 
-    time_steps: int = 10
     input_modalities: int = 2
     antenna_dim: int = 3
     subcarrier_dim: int = 114
-    cnn_hidden_channels: int = 32
-    cnn_output_dim: int = 128
-    lstm_hidden_size: int = 128
-    transformer_layers: int = 2
-    transformer_heads: int = 8
-    transformer_ff_dim: int = 512
+    shot_dim: int = 10
+    frame_feature_dim: int = 256
+    cnn_channels: int = 64
+    gru_hidden_size: int = 128
+    gru_layers: int = 2
+    joint_query_dim: int = 64
+    decoder_hidden_dim: int = 256
     dropout: float = 0.1
     num_keypoints: int = 17
 
 
-class TimeStepEncoder(nn.Module):
-    """Encode one CSI time slice into one compact embedding."""
+class FrameCSIEncoder(nn.Module):
+    """Encode one frame's CSI tensor into one compact feature vector.
+
+    The model treats the two physical modalities and three antenna streams as
+    channels, then applies 2D convolutions over ``subcarrier x CSI time shot``.
+    """
 
     def __init__(self, config: BaselineModelConfig) -> None:
         super().__init__()
-        # Each time step is treated as a small two-channel CSI map:
-        # - channel 0: amplitude
-        # - channel 1: cosine-transformed phase
-        # The encoder stays deliberately shallow because this repository targets
-        # a readable first baseline rather than a heavily engineered backbone.
+        input_channels = config.input_modalities * config.antenna_dim
         self.features = nn.Sequential(
-            nn.Conv2d(config.input_modalities, config.cnn_hidden_channels, kernel_size=3, padding=1),
+            nn.Conv2d(input_channels, config.cnn_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(config.cnn_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(
-                config.cnn_hidden_channels,
-                config.cnn_hidden_channels * 2,
-                kernel_size=3,
-                padding=1,
-            ),
+            nn.Conv2d(config.cnn_channels, config.cnn_channels * 2, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(config.cnn_channels * 2),
             nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d((1, 16)),
+            nn.Conv2d(config.cnn_channels * 2, config.cnn_channels * 4, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(config.cnn_channels * 4),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1)),
         )
         self.projection = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(config.cnn_hidden_channels * 2 * 16, config.cnn_output_dim),
+            nn.Linear(config.cnn_channels * 4, config.frame_feature_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(p=config.dropout),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.features(x)
-        return self.projection(x)
+        return self.projection(self.features(x))
+
+
+class TemporalEncoder(nn.Module):
+    """Model pose-relevant changes across consecutive CSI frames."""
+
+    def __init__(self, config: BaselineModelConfig) -> None:
+        super().__init__()
+        self.gru = nn.GRU(
+            input_size=config.frame_feature_dim,
+            hidden_size=config.gru_hidden_size,
+            num_layers=config.gru_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=config.dropout if config.gru_layers > 1 else 0.0,
+        )
+        self.projection = nn.Sequential(
+            nn.Linear(config.gru_hidden_size * 2, config.frame_feature_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=config.dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        encoded, _ = self.gru(x)
+        return self.projection(encoded)
+
+
+class JointQueryPoseDecoder(nn.Module):
+    """Predict each COCO-17 joint with its own learnable semantic query."""
+
+    def __init__(self, config: BaselineModelConfig) -> None:
+        super().__init__()
+        self.num_keypoints = config.num_keypoints
+        self.joint_queries = nn.Parameter(torch.randn(config.num_keypoints, config.joint_query_dim) * 0.02)
+        self.regressor = nn.Sequential(
+            nn.Linear(config.frame_feature_dim + config.joint_query_dim, config.decoder_hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=config.dropout),
+            nn.Linear(config.decoder_hidden_dim, config.decoder_hidden_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Linear(config.decoder_hidden_dim // 2, 2),
+        )
+
+    def forward(self, frame_features: torch.Tensor) -> torch.Tensor:
+        batch_size, window_size, feature_dim = frame_features.shape
+        features = frame_features.unsqueeze(2).expand(batch_size, window_size, self.num_keypoints, feature_dim)
+        queries = self.joint_queries.view(1, 1, self.num_keypoints, -1).expand(batch_size, window_size, -1, -1)
+        decoder_input = torch.cat((features, queries), dim=-1)
+        return self.regressor(decoder_input)
 
 
 class BaselineLSTMTransformer(nn.Module):
-    """Lightweight frame-level baseline using CSI time steps as the temporal axis."""
+    """Sequence CSI baseline that predicts one pose for each frame in a window.
+
+    Expected input shape is ``B x T x 2 x 3 x 114 x 10``. The output shape is
+    ``B x T x 17 x 2`` using the existing ``[0, 1]`` normalized coordinate target.
+    """
 
     def __init__(self, config: BaselineModelConfig | None = None) -> None:
         super().__init__()
         self.config = config or BaselineModelConfig()
+        self.frame_encoder = FrameCSIEncoder(self.config)
+        self.temporal_encoder = TemporalEncoder(self.config)
+        self.pose_decoder = JointQueryPoseDecoder(self.config)
 
-        # The model follows one simple pipeline:
-        # 1. encode each of the 10 CSI time slices independently
-        # 2. model short-range temporal order with a bidirectional LSTM
-        # 3. refine the temporal tokens with a Transformer encoder
-        # 4. average the token sequence and regress one 17 x 2 pose
-        self.time_step_encoder = TimeStepEncoder(self.config)
-        self.temporal_lstm = nn.LSTM(
-            input_size=self.config.cnn_output_dim,
-            hidden_size=self.config.lstm_hidden_size,
-            num_layers=1,
-            batch_first=True,
-            bidirectional=True,
-        )
-        transformer_dim = self.config.lstm_hidden_size * 2
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=transformer_dim,
-            nhead=self.config.transformer_heads,
-            dim_feedforward=self.config.transformer_ff_dim,
-            dropout=self.config.dropout,
-            batch_first=True,
-        )
-        self.position_embedding = nn.Parameter(
-            torch.zeros(1, self.config.time_steps, transformer_dim)
-        )
-        self.transformer = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=self.config.transformer_layers,
-        )
-        self.regressor = nn.Sequential(
-            nn.Linear(transformer_dim, 128),
-            nn.ReLU(inplace=True),
-            nn.Dropout(p=self.config.dropout),
-            nn.Linear(128, self.config.num_keypoints * 2),
-        )
+    def forward(self, csi_window: torch.Tensor) -> torch.Tensor:
+        if csi_window.ndim != 6:
+            raise ValueError(f"Expected CSI window shape B x T x C x 3 x 114 x 10, got {tuple(csi_window.shape)}")
 
-    def forward(self, csi_amplitude: torch.Tensor, csi_phase_cos: torch.Tensor) -> torch.Tensor:
-        """Predict one normalized 17 x 2 pose from one batch of CSI tensors.
-
-        Expected input shape:
-        - ``csi_amplitude``: ``B x 3 x 114 x 10``
-        - ``csi_phase_cos``: ``B x 3 x 114 x 10``
-
-        The final axis with length ``10`` is the temporal axis modeled by the LSTM
-        and Transformer. The network predicts one pose per frame, so the output shape
-        is ``B x 17 x 2``.
-        """
-
-        if csi_amplitude.shape != csi_phase_cos.shape:
-            raise ValueError(
-                "csi_amplitude and csi_phase_cos must have the same shape, "
-                f"got {tuple(csi_amplitude.shape)} and {tuple(csi_phase_cos.shape)}"
-            )
-
-        batch_size, antenna_dim, subcarrier_dim, time_steps = csi_amplitude.shape
+        batch_size, window_size, modalities, antenna_dim, subcarrier_dim, shot_dim = csi_window.shape
         expected_shape = (
+            self.config.input_modalities,
             self.config.antenna_dim,
             self.config.subcarrier_dim,
-            self.config.time_steps,
+            self.config.shot_dim,
         )
-        if (antenna_dim, subcarrier_dim, time_steps) != expected_shape:
+        if (modalities, antenna_dim, subcarrier_dim, shot_dim) != expected_shape:
             raise ValueError(
-                "Unexpected CSI shape. "
-                f"Expected (B, {expected_shape[0]}, {expected_shape[1]}, {expected_shape[2]}), "
-                f"got {tuple(csi_amplitude.shape)}"
+                "Unexpected CSI window shape. "
+                f"Expected trailing dimensions {expected_shape}, got {tuple(csi_window.shape[2:])}"
             )
 
-        # Stack the two CSI modalities into one channel dimension, then move the
-        # 10 time steps forward so each time step can be encoded independently.
-        time_major = torch.stack((csi_amplitude, csi_phase_cos), dim=1)
-        time_major = time_major.permute(0, 4, 1, 2, 3).contiguous()
-        encoded = self.time_step_encoder(
-            time_major.view(batch_size * self.config.time_steps, self.config.input_modalities, antenna_dim, subcarrier_dim)
+        frame_input = csi_window.reshape(
+            batch_size * window_size,
+            modalities * antenna_dim,
+            subcarrier_dim,
+            shot_dim,
         )
-
-        # Restore the batch/time layout for sequence modeling.
-        encoded = encoded.view(batch_size, self.config.time_steps, self.config.cnn_output_dim)
-        lstm_output, _ = self.temporal_lstm(encoded)
-        transformer_input = lstm_output + self.position_embedding[:, : self.config.time_steps]
-        transformer_output = self.transformer(transformer_input)
-
-        # Mean pooling keeps the regression head minimal and makes the final tensor
-        # independent of any single time step token.
-        pooled = transformer_output.mean(dim=1)
-        keypoints = self.regressor(pooled)
-        return keypoints.view(batch_size, self.config.num_keypoints, 2)
+        frame_features = self.frame_encoder(frame_input)
+        frame_features = frame_features.view(batch_size, window_size, self.config.frame_feature_dim)
+        temporal_features = self.temporal_encoder(frame_features)
+        return self.pose_decoder(temporal_features)
