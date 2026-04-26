@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -21,6 +22,47 @@ from baseline_common import (
     run_epoch,
 )
 from dataloader import MMFiPoseDataset
+
+
+COCO_KEYPOINT_COLORS = (
+    "tab:blue",
+    "tab:orange",
+    "tab:orange",
+    "tab:orange",
+    "tab:orange",
+    "tab:green",
+    "tab:red",
+    "tab:green",
+    "tab:red",
+    "tab:green",
+    "tab:red",
+    "tab:green",
+    "tab:red",
+    "tab:green",
+    "tab:red",
+    "tab:green",
+    "tab:red",
+)
+COCO_SKELETON = (
+    (0, 1, "tab:blue"),
+    (0, 2, "tab:blue"),
+    (1, 3, "tab:blue"),
+    (2, 4, "tab:blue"),
+    (0, 5, "tab:blue"),
+    (0, 6, "tab:blue"),
+    (5, 6, "tab:blue"),
+    (5, 7, "tab:green"),
+    (7, 9, "tab:green"),
+    (6, 8, "tab:red"),
+    (8, 10, "tab:red"),
+    (5, 11, "tab:green"),
+    (6, 12, "tab:red"),
+    (11, 12, "tab:blue"),
+    (11, 13, "tab:green"),
+    (13, 15, "tab:green"),
+    (12, 14, "tab:red"),
+    (14, 16, "tab:red"),
+)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -47,12 +89,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=128, help="Mini-batch size")
     parser.add_argument("--num-workers", type=int, default=0, help="Number of PyTorch dataloader workers")
     parser.add_argument("--device", type=str, default="auto", help="Runtime device, for example auto, cuda, or cpu")
-    parser.add_argument(
-        "--num-visualizations",
-        type=int,
-        default=8,
-        help="Number of prediction-vs-target plots to save",
-    )
     return parser
 
 
@@ -62,6 +98,112 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return build_arg_parser().parse_args(argv)
 
 
+def _decode_h5_string(value: str | bytes) -> str:
+    """Decode one HDF5 string scalar into a plain Python string."""
+
+    return value.decode("utf-8") if isinstance(value, bytes) else str(value)
+
+
+def _normalize_heatmap(csi_heatmap: np.ndarray) -> np.ndarray:
+    """Normalize one CSI heatmap into the ``[0, 1]`` range for plotting."""
+
+    heatmap = np.asarray(csi_heatmap, dtype=np.float32)
+    finite_mask = np.isfinite(heatmap)
+    if not np.any(finite_mask):
+        return np.zeros_like(heatmap, dtype=np.float32)
+
+    finite_values = heatmap[finite_mask]
+    heatmap_min = float(finite_values.min())
+    heatmap_max = float(finite_values.max())
+    if heatmap_max <= heatmap_min:
+        normalized = np.zeros_like(heatmap, dtype=np.float32)
+        normalized[finite_mask] = 1.0
+        return normalized
+
+    normalized = np.zeros_like(heatmap, dtype=np.float32)
+    normalized[finite_mask] = (heatmap[finite_mask] - heatmap_min) / (heatmap_max - heatmap_min)
+    return normalized
+
+
+def _build_csi_heatmap(csi_amplitude: np.ndarray) -> np.ndarray:
+    """Stack three antenna channels vertically into one ``342 x 10`` heatmap."""
+
+    csi_amplitude = np.asarray(csi_amplitude, dtype=np.float32)
+    if csi_amplitude.shape != (3, 114, 10):
+        raise ValueError(f"Expected one CSI amplitude tensor with shape (3, 114, 10), got {csi_amplitude.shape}")
+    return csi_amplitude.reshape(3 * 114, 10)
+
+
+def _compute_pose_limits(target_pose: np.ndarray, prediction_pose: np.ndarray) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Compute one shared plotting window for the target and predicted poses."""
+
+    combined_pose = np.concatenate((target_pose, prediction_pose), axis=0)
+    finite_mask = np.isfinite(combined_pose).all(axis=1)
+    if not np.any(finite_mask):
+        return (-1.0, 1.0), (-1.0, 1.0)
+
+    finite_pose = combined_pose[finite_mask]
+    x_min = float(finite_pose[:, 0].min())
+    x_max = float(finite_pose[:, 0].max())
+    y_min = float(finite_pose[:, 1].min())
+    y_max = float(finite_pose[:, 1].max())
+    x_padding = max((x_max - x_min) * 0.05, 1.0)
+    y_padding = max((y_max - y_min) * 0.05, 1.0)
+    return (x_min - x_padding, x_max + x_padding), (y_min - y_padding, y_max + y_padding)
+
+
+def _draw_pose(axis, pose: np.ndarray, title: str, x_limits: tuple[float, float], y_limits: tuple[float, float]) -> None:
+    """Draw one COCO-17 pose skeleton on the provided matplotlib axis."""
+
+    pose = np.asarray(pose, dtype=np.float32)
+    for start_index, end_index, color in COCO_SKELETON:
+        if np.any(np.isnan(pose[start_index])) or np.any(np.isnan(pose[end_index])):
+            continue
+        axis.plot(
+            [pose[start_index, 0], pose[end_index, 0]],
+            [pose[start_index, 1], pose[end_index, 1]],
+            color=color,
+            linewidth=2.5,
+            solid_capstyle="round",
+        )
+
+    for keypoint_index, color in enumerate(COCO_KEYPOINT_COLORS):
+        if np.any(np.isnan(pose[keypoint_index])):
+            continue
+        axis.scatter(
+            pose[keypoint_index, 0],
+            pose[keypoint_index, 1],
+            s=42,
+            c=color,
+            edgecolors="black",
+            linewidths=0.8,
+            zorder=3,
+        )
+
+    axis.set_title(title)
+    axis.set_aspect("equal", adjustable="box")
+    axis.set_xlim(x_limits)
+    axis.set_ylim(y_limits)
+    axis.invert_yaxis()
+    axis.axis("off")
+
+
+def _expected_visualization_groups(dataset: MMFiPoseDataset) -> list[tuple[str, str]]:
+    """Read the current split coverage and return sorted ``(action, environment)`` pairs."""
+
+    h5_file = dataset._get_h5_file()
+    action_dataset = h5_file["action"]
+    environment_dataset = h5_file["environment"]
+    groups = {
+        (
+            _decode_h5_string(action_dataset[int(frame_index)]),
+            _decode_h5_string(environment_dataset[int(frame_index)]),
+        )
+        for frame_index in dataset.indices
+    }
+    return sorted(groups)
+
+
 def _save_visualizations(
     model: nn.Module,
     dataloader,
@@ -69,16 +211,9 @@ def _save_visualizations(
     output_dir: Path,
     x_scale: float,
     y_scale: float,
-    num_visualizations: int,
-) -> None:
-    """Save a small set of prediction-vs-target keypoint plots.
-
-    The saved figures are intentionally simple. They exist to verify that predicted
-    skeleton geometry is plausible, not to build a polished visualization system.
-    """
-
-    if num_visualizations <= 0:
-        return
+    dataset: MMFiPoseDataset,
+) -> dict[str, object]:
+    """Save one CSI-plus-skeleton figure for each ``(action, environment)`` group."""
 
     try:
         import matplotlib
@@ -87,13 +222,14 @@ def _save_visualizations(
         import matplotlib.pyplot as plt
     except ImportError as error:  # pragma: no cover - depends on optional runtime package.
         raise ImportError(
-            "matplotlib is required to save evaluation visualizations. "
-            "Install matplotlib or set --num-visualizations 0."
+            "matplotlib is required to save evaluation visualizations."
         ) from error
 
     visualization_dir = output_dir / "visualizations"
     visualization_dir.mkdir(parents=True, exist_ok=True)
-    saved = 0
+    expected_groups = _expected_visualization_groups(dataset)
+    selected_groups: list[str] = []
+    saved_groups: set[tuple[str, str]] = set()
     scale = torch.tensor((x_scale, y_scale), device=device, dtype=torch.float32).view(1, 1, 2)
     model.eval()
 
@@ -107,29 +243,74 @@ def _save_visualizations(
             samples = batch["sample"]
             environments = batch["environment"]
             frame_ids = batch["frame_id"]
+            heatmaps = csi_amplitude.detach().cpu().numpy()
 
             for index in range(prediction_pixels.shape[0]):
-                if saved >= num_visualizations:
-                    return
+                group = (str(actions[index]), str(environments[index]))
+                if group in saved_groups:
+                    continue
 
-                figure, axis = plt.subplots(figsize=(5, 5))
-                axis.scatter(target_pixels[index, :, 0], target_pixels[index, :, 1], c="tab:green", label="target")
-                axis.scatter(prediction_pixels[index, :, 0], prediction_pixels[index, :, 1], c="tab:red", label="prediction")
-                axis.set_title(
+                x_limits, y_limits = _compute_pose_limits(target_pixels[index], prediction_pixels[index])
+                normalized_heatmap = _normalize_heatmap(_build_csi_heatmap(heatmaps[index]))
+                figure, axes = plt.subplots(
+                    nrows=3,
+                    ncols=1,
+                    figsize=(6, 10),
+                    dpi=200,
+                    gridspec_kw={"height_ratios": (1.1, 1.0, 1.0)},
+                )
+                heatmap_axis, target_axis, prediction_axis = axes
+                image = heatmap_axis.imshow(
+                    normalized_heatmap,
+                    aspect="auto",
+                    origin="lower",
+                    cmap="jet",
+                )
+                heatmap_axis.set_title(
                     f"{actions[index]} {samples[index]} {environments[index]} {frame_ids[index]}"
                 )
-                axis.set_xlabel("x")
-                axis.set_ylabel("y")
-                axis.invert_yaxis()
-                axis.legend(loc="best")
-                axis.set_aspect("equal", adjustable="box")
-                file_name = (
-                    f"{actions[index]}_{samples[index]}_{environments[index]}_{frame_ids[index]}.png"
+                heatmap_axis.set_xlabel("Time step")
+                heatmap_axis.set_ylabel("Antenna/Subcarrier")
+                figure.colorbar(image, ax=heatmap_axis, fraction=0.046, pad=0.04, label="Normalized amplitude")
+
+                _draw_pose(
+                    target_axis,
+                    target_pixels[index],
+                    title="Ground Truth",
+                    x_limits=x_limits,
+                    y_limits=y_limits,
                 )
+                _draw_pose(
+                    prediction_axis,
+                    prediction_pixels[index],
+                    title="Prediction",
+                    x_limits=x_limits,
+                    y_limits=y_limits,
+                )
+
+                file_name = f"{actions[index]}_{environments[index]}_{samples[index]}_{frame_ids[index]}.png"
                 figure.tight_layout()
                 figure.savefig(visualization_dir / file_name, dpi=150)
                 plt.close(figure)
-                saved += 1
+                saved_groups.add(group)
+                selected_groups.append(f"{group[0]}/{group[1]}")
+                if len(saved_groups) == len(expected_groups):
+                    break
+
+            if len(saved_groups) == len(expected_groups):
+                break
+
+    missing_groups = [
+        f"{action}/{environment}"
+        for action, environment in expected_groups
+        if (action, environment) not in saved_groups
+    ]
+    return {
+        "visualization_mode": "per_action_environment",
+        "num_visualizations_saved": len(saved_groups),
+        "selected_groups": selected_groups,
+        "missing_groups": missing_groups,
+    }
 
 
 def main(argv: list[str] | None = None) -> dict[str, float]:
@@ -172,16 +353,17 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
         "metrics": metrics,
         "pck_thresholds": list(PCK_THRESHOLDS),
     }
-    (output_dir / "eval_metrics.json").write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
-    _save_visualizations(
+    visualization_summary = _save_visualizations(
         model=model,
         dataloader=dataloader,
         device=device,
         output_dir=output_dir,
         x_scale=x_scale,
         y_scale=y_scale,
-        num_visualizations=args.num_visualizations,
+        dataset=dataset,
     )
+    metrics_payload["visualizations"] = visualization_summary
+    (output_dir / "eval_metrics.json").write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
     return metrics
 
 

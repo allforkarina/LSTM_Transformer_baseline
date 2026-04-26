@@ -5,7 +5,7 @@
 - `baseline_common.py`: Shared training and evaluation helpers such as metric aggregation, checkpoint config handling, dataloader construction, and device selection.
 - `models/`: Baseline model package. The current baseline is a frame-level `LSTM + Transformer` regressor for MM-Fi pose estimation.
 - `train.py`: Training entrypoint for Linux-server experiments, including `tqdm` epoch visualization, readable CSV logging, early stopping, checkpointing, and test-set evaluation after the best validation checkpoint is selected.
-- `eval.py`: Evaluation entrypoint for loading one checkpoint, computing metrics on one split, and saving prediction-vs-target visualizations.
+- `eval.py`: Evaluation entrypoint for loading one checkpoint, computing metrics on one split, and saving one CSI-plus-skeleton visualization for each `(action, environment)` group in the evaluated split.
 - `scripts/build_h5_dataset.py`: Command-line wrapper that packs the raw MM-Fi directory tree into one `.h5` or `.hdf5` dataset file.
 - `tests/`: `pytest` tests for baseline model shape checks and CLI parsing.
 - `.gitignore`: Excludes Python caches, pytest caches, local packed data, and generated experiment outputs.
@@ -72,11 +72,13 @@ Train the baseline model on Linux with the frame-random comparison split:
 python train.py --dataset-root /data/WiFiPose/dataset/mmfi_pose.h5 --split-scheme frame_random --epochs 60 --batch-size 128 --output-dir outputs/frame_random_baseline
 ```
 
-Evaluate one checkpoint and save metrics plus visualizations:
+Evaluate one checkpoint and save metrics plus per-`(action, environment)` visualizations:
 
 ```powershell
 python eval.py --dataset-root /data/WiFiPose/dataset/mmfi_pose.h5 --checkpoint outputs/action_env_baseline/best_val_mpjpe.pth --output-dir outputs/eval_action_env
 ```
+
+The evaluation script writes one `.png` file for each `(action, environment)` combination covered by the evaluated split. For the standard MM-Fi `action_env` setup this means `27 x 4 = 108` visualization images under `output_dir/visualizations/`.
 
 Training logs are written to `train_log.csv` with one row per epoch. The log includes grouped train and validation metrics, elapsed time, the current best validation MPJPE, an `is_best` marker, and the current early-stopping counter.
 
