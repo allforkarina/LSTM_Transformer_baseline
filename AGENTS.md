@@ -4,7 +4,7 @@
 - `dataloader.py`: Core module for discovering raw MM-Fi samples, validating frame alignment, building split indices, cleaning CSI features, packing one HDF5 dataset, loading HDF5 splits, creating PyTorch `DataLoader` instances, and previewing split contents.
 - `baseline_common.py`: Shared training and evaluation helpers such as metric aggregation, checkpoint config handling, dataloader construction, and device selection.
 - `models/`: Baseline model package. The current baseline is a frame-level `LSTM + Transformer` regressor for MM-Fi pose estimation.
-- `train.py`: Training entrypoint for Linux-server experiments, including logging, early stopping, checkpointing, and test-set evaluation after the best validation checkpoint is selected.
+- `train.py`: Training entrypoint for Linux-server experiments, including `tqdm` epoch visualization, readable CSV logging, early stopping, checkpointing, and test-set evaluation after the best validation checkpoint is selected.
 - `eval.py`: Evaluation entrypoint for loading one checkpoint, computing metrics on one split, and saving prediction-vs-target visualizations.
 - `scripts/build_h5_dataset.py`: Command-line wrapper that packs the raw MM-Fi directory tree into one `.h5` or `.hdf5` dataset file.
 - `tests/`: `pytest` tests for baseline model shape checks and CLI parsing.
@@ -72,17 +72,13 @@ Train the baseline model on Linux with the frame-random comparison split:
 python train.py --dataset-root /data/WiFiPose/dataset/mmfi_pose.h5 --split-scheme frame_random --epochs 60 --batch-size 128 --output-dir outputs/frame_random_baseline
 ```
 
-Run a tiny overfit or sanity check on Linux:
-
-```powershell
-python train.py --dataset-root /data/WiFiPose/dataset/mmfi_pose.h5 --split-scheme action_env --subset-size 512 --epochs 80 --output-dir outputs/tiny_overfit
-```
-
 Evaluate one checkpoint and save metrics plus visualizations:
 
 ```powershell
 python eval.py --dataset-root /data/WiFiPose/dataset/mmfi_pose.h5 --checkpoint outputs/action_env_baseline/best_val_mpjpe.pth --output-dir outputs/eval_action_env
 ```
+
+Training logs are written to `train_log.csv` with one row per epoch. The log includes grouped train and validation metrics, elapsed time, the current best validation MPJPE, an `is_best` marker, and the current early-stopping counter.
 
 Run lightweight local verification:
 
@@ -96,7 +92,7 @@ Use Python 3.10+ syntax, type hints, and `pathlib.Path` for paths. Group imports
 ## Testing Guidelines
 Automated tests use `pytest`. Keep fixtures synthetic and small on the local machine. Prioritize coverage for baseline model output shapes, CLI parsing, raw-directory discovery, frame-count validation, frame-name alignment, HDF5 round-tripping, split generation, shape validation, and CSI cleaning or normalization edge cases.
 
-Local verification should stay lightweight. Do not run long training jobs on the local machine. Use the Linux server for full training, overfit checks on real data, validation, evaluation, and artifact generation.
+Local verification should stay lightweight. Do not run long training jobs on the local machine. Use the Linux server for full training, validation, evaluation, and artifact generation.
 
 ## Commit & Pull Request Guidelines
 Use concise imperative commits, for example `Update AGENTS for baseline dataset project`. Pull requests should include a summary, commands run, dataset assumptions, and any relevant tensor-shape or frame-count output. Do not commit generated datasets, virtual environments, or machine-specific paths.

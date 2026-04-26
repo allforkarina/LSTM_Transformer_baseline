@@ -18,6 +18,7 @@ def test_train_parser_defaults() -> None:
     assert args.split_scheme == "action_env"
     assert args.epochs == 60
     assert args.batch_size == 128
+    assert not hasattr(args, "subset_size")
 
 
 def test_eval_parser_defaults() -> None:

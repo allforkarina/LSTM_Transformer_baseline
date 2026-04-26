@@ -71,7 +71,11 @@ def _save_visualizations(
     y_scale: float,
     num_visualizations: int,
 ) -> None:
-    """Save a small set of prediction-vs-target keypoint plots."""
+    """Save a small set of prediction-vs-target keypoint plots.
+
+    The saved figures are intentionally simple. They exist to verify that predicted
+    skeleton geometry is plausible, not to build a polished visualization system.
+    """
 
     if num_visualizations <= 0:
         return
@@ -140,6 +144,8 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
     split_scheme = args.split_scheme or checkpoint_config.get("split_scheme", "action_env")
     model_config = model_config_from_dict(checkpoint_config["model"])
 
+    # Evaluation reuses the same split statistics that were written into the HDF5 file
+    # so metrics stay consistent with training-time normalization.
     dataset = MMFiPoseDataset(dataset_root=args.dataset_root, split=args.split, split_scheme=split_scheme)
     dataloader = build_dataloader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     x_scale, y_scale = get_dataset_scales(dataset)
@@ -154,6 +160,7 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
         criterion=criterion,
         x_scale=x_scale,
         y_scale=y_scale,
+        phase_name=args.split,
     )
     metrics_payload = {
         "dataset_root": args.dataset_root,

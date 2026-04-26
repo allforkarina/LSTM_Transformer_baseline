@@ -10,7 +10,8 @@ from typing import Dict
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 
 from models import BaselineLSTMTransformer, BaselineModelConfig
 
@@ -44,26 +45,21 @@ def ensure_output_dir(output_dir: str | Path) -> Path:
     return path
 
 
-def maybe_subset_dataset(dataset: Dataset, subset_size: int | None, seed: int) -> Dataset:
-    """Return a deterministic subset when the caller requests a smaller split view."""
-
-    if subset_size is None or subset_size <= 0 or subset_size >= len(dataset):
-        return dataset
-
-    generator = torch.Generator().manual_seed(seed)
-    indices = torch.randperm(len(dataset), generator=generator)[:subset_size].tolist()
-    return Subset(dataset, indices)
-
-
 def get_dataset_scales(dataset: Dataset) -> tuple[float, float]:
-    """Read keypoint normalization scales from a dataset or subset wrapper."""
+    """Read the axis-wise keypoint scales stored in one HDF5-backed dataset."""
 
-    base_dataset = dataset.dataset if isinstance(dataset, Subset) else dataset
-    return float(base_dataset.keypoint_x_scale), float(base_dataset.keypoint_y_scale)
+    return float(dataset.keypoint_x_scale), float(dataset.keypoint_y_scale)
 
 
 def move_batch_to_device(batch: Dict[str, torch.Tensor], device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Extract the tensor fields used by the baseline and move them onto one device."""
+    """Move one dataloader batch onto the target device.
+
+    The baseline consumes two CSI feature tensors:
+    - ``csi_amplitude``: normalized amplitude with shape ``B x 3 x 114 x 10``
+    - ``csi_phase_cos``: cosine-transformed phase with the same shape
+
+    The regression target is one normalized keypoint tensor with shape ``B x 17 x 2``.
+    """
 
     csi_amplitude = batch["csi_amplitude"].to(device=device, dtype=torch.float32)
     csi_phase_cos = batch["csi_phase_cos"].to(device=device, dtype=torch.float32)
@@ -77,7 +73,12 @@ def compute_batch_statistics(
     x_scale: float,
     y_scale: float,
 ) -> Dict[str, float]:
-    """Compute one batch's pose metrics in normalized and pixel spaces."""
+    """Compute pose metrics for one batch.
+
+    ``predictions`` and ``targets`` are normalized coordinates. MPJPE is reported after
+    restoring the original pixel scale so the metric remains human-readable, while PCK
+    stays on normalized coordinates so each threshold remains dimensionless and stable.
+    """
 
     scale = torch.tensor((x_scale, y_scale), device=predictions.device, dtype=predictions.dtype).view(1, 1, 2)
     prediction_pixels = predictions * scale
@@ -100,9 +101,16 @@ def run_epoch(
     criterion: nn.Module,
     x_scale: float,
     y_scale: float,
+    phase_name: str,
     optimizer: torch.optim.Optimizer | None = None,
 ) -> Dict[str, float]:
-    """Run one training or evaluation epoch and return aggregated metrics."""
+    """Run one full pass over a dataloader and aggregate split-level metrics.
+
+    The same function serves train, validation, and test splits. Passing an optimizer
+    enables gradient updates; omitting it turns the loop into a pure evaluation pass.
+    A ``tqdm`` progress bar is always shown so long-running Linux jobs expose where an
+    epoch currently is and what the latest batch-level loss looks like.
+    """
 
     is_training = optimizer is not None
     model.train(mode=is_training)
@@ -112,7 +120,13 @@ def run_epoch(
     total_keypoints = 0.0
     pck_correct = {threshold: 0.0 for threshold in PCK_THRESHOLDS}
 
-    for batch in dataloader:
+    progress_bar = tqdm(
+        dataloader,
+        desc=phase_name,
+        leave=False,
+        dynamic_ncols=True,
+    )
+    for batch in progress_bar:
         csi_amplitude, csi_phase_cos, targets = move_batch_to_device(batch, device)
 
         if is_training:
@@ -134,6 +148,10 @@ def run_epoch(
         total_keypoints += batch_stats["num_keypoints"]
         for threshold in PCK_THRESHOLDS:
             pck_correct[threshold] += batch_stats[f"pck_{threshold:.2f}_correct"]
+        progress_bar.set_postfix(
+            loss=f"{loss.item():.4f}",
+            mpjpe=f"{batch_stats['distance_sum_pixels'] / batch_stats['num_keypoints']:.2f}",
+        )
 
     if total_samples == 0 or total_keypoints == 0:
         raise ValueError("The dataloader produced no samples.")

@@ -31,6 +31,11 @@ class TimeStepEncoder(nn.Module):
 
     def __init__(self, config: BaselineModelConfig) -> None:
         super().__init__()
+        # Each time step is treated as a small two-channel CSI map:
+        # - channel 0: amplitude
+        # - channel 1: cosine-transformed phase
+        # The encoder stays deliberately shallow because this repository targets
+        # a readable first baseline rather than a heavily engineered backbone.
         self.features = nn.Sequential(
             nn.Conv2d(config.input_modalities, config.cnn_hidden_channels, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
@@ -61,6 +66,12 @@ class BaselineLSTMTransformer(nn.Module):
     def __init__(self, config: BaselineModelConfig | None = None) -> None:
         super().__init__()
         self.config = config or BaselineModelConfig()
+
+        # The model follows one simple pipeline:
+        # 1. encode each of the 10 CSI time slices independently
+        # 2. model short-range temporal order with a bidirectional LSTM
+        # 3. refine the temporal tokens with a Transformer encoder
+        # 4. average the token sequence and regress one 17 x 2 pose
         self.time_step_encoder = TimeStepEncoder(self.config)
         self.temporal_lstm = nn.LSTM(
             input_size=self.config.cnn_output_dim,
@@ -92,6 +103,17 @@ class BaselineLSTMTransformer(nn.Module):
         )
 
     def forward(self, csi_amplitude: torch.Tensor, csi_phase_cos: torch.Tensor) -> torch.Tensor:
+        """Predict one normalized 17 x 2 pose from one batch of CSI tensors.
+
+        Expected input shape:
+        - ``csi_amplitude``: ``B x 3 x 114 x 10``
+        - ``csi_phase_cos``: ``B x 3 x 114 x 10``
+
+        The final axis with length ``10`` is the temporal axis modeled by the LSTM
+        and Transformer. The network predicts one pose per frame, so the output shape
+        is ``B x 17 x 2``.
+        """
+
         if csi_amplitude.shape != csi_phase_cos.shape:
             raise ValueError(
                 "csi_amplitude and csi_phase_cos must have the same shape, "
@@ -111,15 +133,22 @@ class BaselineLSTMTransformer(nn.Module):
                 f"got {tuple(csi_amplitude.shape)}"
             )
 
+        # Stack the two CSI modalities into one channel dimension, then move the
+        # 10 time steps forward so each time step can be encoded independently.
         time_major = torch.stack((csi_amplitude, csi_phase_cos), dim=1)
         time_major = time_major.permute(0, 4, 1, 2, 3).contiguous()
         encoded = self.time_step_encoder(
             time_major.view(batch_size * self.config.time_steps, self.config.input_modalities, antenna_dim, subcarrier_dim)
         )
+
+        # Restore the batch/time layout for sequence modeling.
         encoded = encoded.view(batch_size, self.config.time_steps, self.config.cnn_output_dim)
         lstm_output, _ = self.temporal_lstm(encoded)
         transformer_input = lstm_output + self.position_embedding[:, : self.config.time_steps]
         transformer_output = self.transformer(transformer_input)
+
+        # Mean pooling keeps the regression head minimal and makes the final tensor
+        # independent of any single time step token.
         pooled = transformer_output.mean(dim=1)
         keypoints = self.regressor(pooled)
         return keypoints.view(batch_size, self.config.num_keypoints, 2)
