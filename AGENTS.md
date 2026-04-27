@@ -2,11 +2,16 @@
 
 ## Project Structure & Module Organization
 - `dataloader.py`: Core module for discovering raw MM-Fi samples, validating frame alignment, building split indices, cleaning CSI features, packing one HDF5 dataset, loading HDF5 splits, creating PyTorch `DataLoader` instances, and previewing split contents.
+- `models/csi2pose.py`: CSI2Pose v1 model that encodes CSI windows with a per-frame CNN, temporal TCN blocks, COCO17 joint queries, heatmap prediction, and soft-argmax coordinate decoding.
+- `metrics.py`: PCK@5/10/20/50 computation in restored pixel-coordinate space, including overall and per-joint COCO17 scores.
+- `train.py`: Server-side training entrypoint with tqdm progress, AMP support, best-checkpoint selection by validation PCK@20, and final test evaluation.
+- `test.py`: Server-side checkpoint evaluation entrypoint for train, val, or test splits.
+- `configs/csi2pose_tcn.yaml`: Default CSI2Pose v1 experiment configuration.
 - `scripts/build_h5_dataset.py`: Command-line wrapper that packs the raw MM-Fi directory tree into one `.h5` or `.hdf5` dataset file.
-- `tests/`: `pytest` tests for HDF5-backed dataset loading, sequence-window construction, and dataset-build CLI parsing.
+- `tests/`: `pytest` tests for HDF5-backed dataset loading, sequence-window construction, model forward shapes, heatmap target construction, PCK metrics, and CLI parsing.
 - `.gitignore`: Excludes Python caches, pytest caches, local packed data, and generated experiment outputs.
 
-This repository is now a small MM-Fi data preparation and loading subproject. It intentionally does not contain a model, training loop, evaluation script, checkpoint logic, metrics, or visualization pipeline. New baseline experiments should be designed and added from a clean state after the data contract is confirmed.
+This repository is now a small MM-Fi CSI-to-pose baseline project. It contains data preparation/loading utilities plus a first CSI2Pose v1 training baseline. The baseline predicts COCO17 2D keypoints from CSI amplitude and bounded phase features using a heatmap-based decoder rather than direct unstructured coordinate regression.
 
 Use the current local checkout for code modification only. Do not run training, evaluation, long data packing, visualization generation, checkpoint export, or any experiment-output generation on this machine. All training runs and all generated outputs must be produced on the Linux server after the server pulls the latest code with `git pull`.
 
@@ -25,7 +30,7 @@ The repository currently uses these physical features:
 - `csi_phase`: cleaned CSI phase. The pipeline interpolates non-finite subcarrier values, unwraps phase along the subcarrier axis, and removes the per-antenna linear trend.
 - `csi_phase_cos`: cosine-transformed cleaned phase for a bounded phase feature.
 
-The dataset loaders expose both frame-level records and contiguous sequence windows. A model is not defined in this project state.
+The dataset loaders expose both frame-level records and contiguous sequence windows. The CSI2Pose v1 model consumes sequence windows and predicts every frame in the window; downstream visualization should use the middle frame when only one representative pose is needed.
 
 One packed HDF5 stores:
 - frame-level `keypoints`, `csi_amplitude`, `csi_phase`, `csi_phase_cos`
@@ -66,13 +71,25 @@ Run lightweight local verification:
 pytest
 ```
 
+Train CSI2Pose v1 only on the Linux server after pulling the latest code:
+
+```bash
+python train.py --config configs/csi2pose_tcn.yaml --dataset-root /path/to/mmfi_pose.h5
+```
+
+Evaluate a saved CSI2Pose checkpoint only on the Linux server:
+
+```bash
+python test.py --config configs/csi2pose_tcn.yaml --dataset-root /path/to/mmfi_pose.h5 --checkpoint runs/csi2pose_tcn/best.pt
+```
+
 ## Coding Style & Naming Conventions
 Use Python 3.10+ syntax, type hints, and `pathlib.Path` for paths. Group imports as standard library, third-party, then local. Follow existing naming: `snake_case` functions and variables, `PascalCase` classes, and uppercase constants such as `SPLIT_NAMES` or `CSI_SHAPE`. Use 4-space indentation. Keep comments focused on dataset assumptions, tensor shapes, alignment constraints, and normalization or cleaning behavior.
 
 ## Testing Guidelines
 Automated tests use `pytest`. Keep fixtures synthetic and small on the local machine. Prioritize coverage for raw-directory discovery, frame-count validation, frame-name alignment, HDF5 round-tripping, split generation, shape validation, sequence-window construction, and CSI cleaning or normalization edge cases.
 
-Local verification should stay lightweight and code-focused. Do not run training, evaluation, long data-packing jobs, or output-producing experiment commands on the local machine.
+Local verification should stay lightweight and code-focused. Do not run training, evaluation, long data-packing jobs, checkpoint generation, metrics export, or output-producing experiment commands on the local machine.
 
 ## Commit & Pull Request Guidelines
 Use concise imperative commits, for example `Update AGENTS for baseline dataset project`. Pull requests should include a summary, commands run, dataset assumptions, and any relevant tensor-shape or frame-count output. Do not commit generated datasets, virtual environments, or machine-specific paths.
