@@ -30,7 +30,7 @@ The repository currently uses these physical features:
 - `csi_phase`: cleaned CSI phase. The pipeline interpolates non-finite subcarrier values, unwraps phase along the subcarrier axis, and removes the per-antenna linear trend.
 - `csi_phase_cos`: cosine-transformed cleaned phase for a bounded phase feature.
 
-The dataset loaders expose both frame-level records and contiguous sequence windows. The CSI2Pose v1 model consumes sequence windows and predicts every frame in the window; downstream visualization should use the middle frame when only one representative pose is needed.
+The dataset loaders expose both frame-level records and contiguous sequence windows. Sequence-window construction reads HDF5 metadata in bulk before grouping frames, because per-frame HDF5 string reads are too slow for the full packed dataset. The CSI2Pose v1 model consumes sequence windows and predicts every frame in the window; downstream visualization should use the middle frame when only one representative pose is needed.
 
 One packed HDF5 stores:
 - frame-level `keypoints`, `csi_amplitude`, `csi_phase`, `csi_phase_cos`
@@ -76,6 +76,8 @@ Train CSI2Pose v1 only on the Linux server after pulling the latest code:
 ```bash
 python train.py --config configs/csi2pose_tcn.yaml --dataset-root /path/to/mmfi_pose.h5
 ```
+
+During startup, `train.py` prints window-building progress for each split. It builds train and validation windows before training, then delays test-window construction until the best checkpoint is ready for final evaluation.
 
 Evaluate a saved CSI2Pose checkpoint only on the Linux server:
 

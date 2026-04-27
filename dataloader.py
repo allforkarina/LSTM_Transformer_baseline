@@ -799,12 +799,18 @@ class MMFiPoseSequenceDataset(Dataset):
 
         grouped_frames: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
         with h5py.File(self.dataset_root, "r") as h5_file:
+            # Read string metadata once. Per-frame HDF5 string access is slow on
+            # large packed datasets and can delay training startup noticeably.
+            actions = np.asarray(h5_file["action"])
+            samples = np.asarray(h5_file["sample"])
+            environments = np.asarray(h5_file["environment"])
+            frame_ids = np.asarray(h5_file["frame_id"])
             for frame_index in self.frame_dataset.indices:
                 frame_index = int(frame_index)
-                action = _decode_string(h5_file["action"][frame_index])
-                sample = _decode_string(h5_file["sample"][frame_index])
-                environment = _decode_string(h5_file["environment"][frame_index])
-                frame_id = _decode_string(h5_file["frame_id"][frame_index])
+                action = _decode_string(actions[frame_index])
+                sample = _decode_string(samples[frame_index])
+                environment = _decode_string(environments[frame_index])
+                frame_id = _decode_string(frame_ids[frame_index])
                 group_key = (action, sample, environment)
                 grouped_frames.setdefault(group_key, []).append((_frame_number(frame_id), frame_index))
 

@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 import torch
 from torch import nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import yaml
@@ -63,6 +63,7 @@ def make_sequence_loader(
 
     data_config = config["data"]
     train_config = config["train"]
+    print(f"Building {split} windows...", flush=True)
     dataset = MMFiPoseSequenceDataset(
         dataset_root=dataset_root,
         split=split,
@@ -70,6 +71,7 @@ def make_sequence_loader(
         window_size=int(data_config["window_size"]),
         window_stride=int(data_config["window_stride"]),
     )
+    print(f"{split} windows: {len(dataset)}", flush=True)
     return DataLoader(
         dataset,
         batch_size=int(train_config["batch_size"]),
@@ -171,7 +173,7 @@ def train_one_epoch(
     for step, raw_batch in enumerate(progress, start=1):
         batch = move_batch_to_device(raw_batch, device=device)
         optimizer.zero_grad(set_to_none=True)
-        with autocast(enabled=use_amp):
+        with autocast(device_type=device.type, enabled=use_amp):
             outputs = model(batch["csi_amplitude"], batch["csi_phase_cos"])
             loss, loss_items = compute_loss(outputs, batch["keypoints"], config=config)
         scaler.scale(loss).backward()
@@ -263,11 +265,10 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         lr=float(config["train"]["learning_rate"]),
         weight_decay=float(config["train"]["weight_decay"]),
     )
-    scaler = GradScaler(enabled=bool(config["train"]["amp"]) and device.type == "cuda")
+    scaler = GradScaler("cuda", enabled=bool(config["train"]["amp"]) and device.type == "cuda")
 
     train_loader = make_sequence_loader(args.dataset_root, "train", config=config, shuffle=True)
     val_loader = make_sequence_loader(args.dataset_root, "val", config=config, shuffle=False)
-    test_loader = make_sequence_loader(args.dataset_root, "test", config=config, shuffle=False)
 
     best_score = -1.0
     best_checkpoint = run_dir / "best.pt"
@@ -284,6 +285,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
 
     checkpoint = torch.load(best_checkpoint, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
+    test_loader = make_sequence_loader(args.dataset_root, "test", config=config, shuffle=False)
     test_metrics = evaluate(model, test_loader, device, config)
     final_metrics = {"best_val_pck@20": best_score, "history": history, "test": test_metrics}
     write_metrics(run_dir / "metrics.json", final_metrics)
