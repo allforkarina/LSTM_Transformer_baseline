@@ -3,6 +3,7 @@ from __future__ import annotations
 """Sequence-level CSI pose model with a CNN frame encoder and joint queries."""
 
 from dataclasses import dataclass
+import math
 
 import torch
 from torch import nn
@@ -18,8 +19,9 @@ class BaselineModelConfig:
     shot_dim: int = 10
     frame_feature_dim: int = 256
     cnn_channels: int = 64
-    gru_hidden_size: int = 128
-    gru_layers: int = 2
+    transformer_layers: int = 4
+    transformer_heads: int = 8
+    transformer_ff_dim: int = 1024
     joint_query_dim: int = 64
     decoder_hidden_dim: int = 256
     dropout: float = 0.1
@@ -64,23 +66,42 @@ class TemporalEncoder(nn.Module):
 
     def __init__(self, config: BaselineModelConfig) -> None:
         super().__init__()
-        self.gru = nn.GRU(
-            input_size=config.frame_feature_dim,
-            hidden_size=config.gru_hidden_size,
-            num_layers=config.gru_layers,
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=config.frame_feature_dim,
+            nhead=config.transformer_heads,
+            dim_feedforward=config.transformer_ff_dim,
+            dropout=config.dropout,
             batch_first=True,
-            bidirectional=True,
-            dropout=config.dropout if config.gru_layers > 1 else 0.0,
+            norm_first=True,
         )
-        self.projection = nn.Sequential(
-            nn.Linear(config.gru_hidden_size * 2, config.frame_feature_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(p=config.dropout),
-        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=config.transformer_layers)
+        self.output_norm = nn.LayerNorm(config.frame_feature_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        encoded, _ = self.gru(x)
-        return self.projection(encoded)
+        encoded = x + self._sinusoidal_position_encoding(
+            window_size=x.shape[1],
+            feature_dim=x.shape[2],
+            device=x.device,
+            dtype=x.dtype,
+        )
+        return self.output_norm(self.encoder(encoded))
+
+    @staticmethod
+    def _sinusoidal_position_encoding(
+        window_size: int,
+        feature_dim: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Create a dynamic sinusoidal encoding for the current window length."""
+
+        positions = torch.arange(window_size, device=device, dtype=dtype).unsqueeze(1)
+        dimensions = torch.arange(0, feature_dim, 2, device=device, dtype=dtype)
+        div_term = torch.exp(dimensions * (-math.log(10000.0) / feature_dim))
+        encoding = torch.zeros(1, window_size, feature_dim, device=device, dtype=dtype)
+        encoding[0, :, 0::2] = torch.sin(positions * div_term)
+        encoding[0, :, 1::2] = torch.cos(positions * div_term[: encoding[0, :, 1::2].shape[-1]])
+        return encoding
 
 
 class JointQueryPoseDecoder(nn.Module):
