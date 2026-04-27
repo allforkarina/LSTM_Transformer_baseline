@@ -162,6 +162,7 @@ def run_epoch(
     y_scale: float,
     phase_name: str,
     optimizer: torch.optim.Optimizer | None = None,
+    max_grad_norm: float | None = None,
 ) -> Dict[str, float]:
     """Run one train/eval pass and aggregate sequence-level metrics."""
 
@@ -186,6 +187,8 @@ def run_epoch(
 
         if is_training:
             loss_parts["loss"].backward()
+            if max_grad_norm is not None and max_grad_norm > 0:
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
             optimizer.step()
 
         batch_size = int(targets.shape[0])

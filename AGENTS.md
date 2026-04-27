@@ -4,7 +4,7 @@
 - `dataloader.py`: Core module for discovering raw MM-Fi samples, validating frame alignment, building split indices, cleaning CSI features, packing one HDF5 dataset, loading HDF5 splits, creating PyTorch `DataLoader` instances, and previewing split contents.
 - `baseline_common.py`: Shared training and evaluation helpers such as sequence loss computation, pixel-space metrics, checkpoint config handling, dataloader construction, and device selection.
 - `models/`: Baseline model package. The current baseline is a sequence-level CSI pose regressor with a frame CNN encoder, a 2-layer BiGRU temporal encoder, and a joint-query pose decoder.
-- `train.py`: Training entrypoint for Linux-server experiments, including `tqdm` epoch visualization, readable CSV logging, structured pose/bone/temporal losses, early stopping, checkpointing, and test-set evaluation after the best validation checkpoint is selected.
+- `train.py`: Training entrypoint for Linux-server experiments, including `tqdm` epoch visualization, readable CSV logging, structured pose/bone/temporal losses, AdamW with cosine annealing, gradient clipping, early stopping, checkpointing, and test-set evaluation after the best validation checkpoint is selected.
 - `eval.py`: Evaluation entrypoint for loading one checkpoint, computing pixel-space test metrics, and saving middle-frame CSI/skeleton visualizations for each `(action, environment)` group in the evaluated split.
 - `scripts/build_h5_dataset.py`: Command-line wrapper that packs the raw MM-Fi directory tree into one `.h5` or `.hdf5` dataset file.
 - `tests/`: `pytest` tests for baseline model shape checks and CLI parsing.
@@ -90,6 +90,7 @@ Training logs are written to `train_log.csv` with one row per epoch. The log inc
 - Pose decoder: 17 learnable COCO joint queries, one per keypoint, concatenated with each temporal feature before shared MLP coordinate regression.
 - Output shape: `B x T x 17 x 2` in the existing `[0, 1]` keypoint normalization space.
 - Loss: `SmoothL1` pose loss plus `0.1` bone-length loss and `0.05` temporal-delta loss.
+- Optimizer and scheduler: AdamW with `CosineAnnealingLR`; global gradient clipping defaults to `--max-grad-norm 1.0` and can be disabled with `--max-grad-norm 0`.
 - Metrics: pixel-space `MPJPE` and pixel-space PCK thresholds. Do not use the old normalized-coordinate `PCK@0.05/0.10/0.20` for reporting.
 
 Run lightweight local verification:

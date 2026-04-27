@@ -54,6 +54,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--smooth-l1-beta", type=float, default=0.02, help="Beta parameter for SmoothL1Loss")
     parser.add_argument("--bone-loss-weight", type=float, default=0.1, help="Weight for bone-length consistency")
     parser.add_argument("--temporal-loss-weight", type=float, default=0.05, help="Weight for temporal-delta consistency")
+    parser.add_argument(
+        "--max-grad-norm",
+        type=float,
+        default=1.0,
+        help="Global gradient clipping norm. Set to 0 to disable clipping.",
+    )
     return parser
 
 
@@ -230,6 +236,7 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
         "smooth_l1_beta": args.smooth_l1_beta,
         "bone_loss_weight": args.bone_loss_weight,
         "temporal_loss_weight": args.temporal_loss_weight,
+        "max_grad_norm": args.max_grad_norm,
         "model": model_config_to_dict(model.config),
     }
     (output_dir / "config.json").write_text(json.dumps(run_config, indent=2), encoding="utf-8")
@@ -257,6 +264,7 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
                 y_scale=y_scale,
                 phase_name=f"train {epoch:03d}",
                 optimizer=optimizer,
+                max_grad_norm=args.max_grad_norm,
             )
             val_metrics = run_epoch(
                 model,

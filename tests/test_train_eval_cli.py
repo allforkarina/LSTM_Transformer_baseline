@@ -5,8 +5,10 @@ import importlib
 import h5py
 import numpy as np
 import torch
+from torch import nn
+from torch.utils.data import DataLoader, Dataset
 
-from baseline_common import PoseSequenceLoss, compute_batch_statistics
+from baseline_common import PoseSequenceLoss, compute_batch_statistics, run_epoch
 from dataloader import MMFiPoseSequenceDataset
 import train
 
@@ -28,6 +30,7 @@ def test_train_parser_defaults() -> None:
     assert args.window_stride == 4
     assert args.bone_loss_weight == 0.1
     assert args.temporal_loss_weight == 0.05
+    assert args.max_grad_norm == 1.0
     assert not hasattr(args, "subset_size")
 
 
@@ -113,3 +116,48 @@ def test_sequence_dataset_builds_contiguous_windows(tmp_path) -> None:
     sample = dataset[0]
     assert sample["keypoints"].shape == (2, 17, 2)
     assert sample["csi_amplitude"].shape == (2, 3, 114, 10)
+
+
+class _TinySequenceDataset(Dataset):
+    def __len__(self) -> int:
+        return 2
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        del index
+        return {
+            "csi_amplitude": torch.zeros(2, 3, 114, 10),
+            "csi_phase_cos": torch.zeros(2, 3, 114, 10),
+            "keypoints": torch.ones(2, 17, 2),
+        }
+
+
+class _TinyPoseModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.bias = nn.Parameter(torch.zeros(17, 2))
+
+    def forward(self, csi_window: torch.Tensor) -> torch.Tensor:
+        batch_size, window_size = csi_window.shape[:2]
+        return self.bias.view(1, 1, 17, 2).expand(batch_size, window_size, 17, 2)
+
+
+def test_run_epoch_supports_gradient_clipping() -> None:
+    model = _TinyPoseModel()
+    dataloader = DataLoader(_TinySequenceDataset(), batch_size=2)
+    criterion = PoseSequenceLoss(beta=0.02, bone_weight=0.1, temporal_weight=0.05)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+
+    metrics = run_epoch(
+        model,
+        dataloader,
+        device=torch.device("cpu"),
+        criterion=criterion,
+        x_scale=100.0,
+        y_scale=100.0,
+        phase_name="test-train",
+        optimizer=optimizer,
+        max_grad_norm=0.1,
+    )
+
+    assert metrics["loss"] > 0
+    assert torch.isfinite(model.bias).all()
