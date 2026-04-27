@@ -8,6 +8,8 @@
 
 This repository is now a small MM-Fi data preparation and loading subproject. It intentionally does not contain a model, training loop, evaluation script, checkpoint logic, metrics, or visualization pipeline. New baseline experiments should be designed and added from a clean state after the data contract is confirmed.
 
+Use the current local checkout for code modification only. Do not run training, evaluation, long data packing, visualization generation, checkpoint export, or any experiment-output generation on this machine. All training runs and all generated outputs must be produced on the Linux server after the server pulls the latest code with `git pull`.
+
 Generated datasets can be large and should not be committed. Keep raw dataset roots outside the repository.
 
 ## Dataset Format & Physical Features
@@ -70,7 +72,7 @@ Use Python 3.10+ syntax, type hints, and `pathlib.Path` for paths. Group imports
 ## Testing Guidelines
 Automated tests use `pytest`. Keep fixtures synthetic and small on the local machine. Prioritize coverage for raw-directory discovery, frame-count validation, frame-name alignment, HDF5 round-tripping, split generation, shape validation, sequence-window construction, and CSI cleaning or normalization edge cases.
 
-Local verification should stay lightweight. Do not run long data-packing jobs on the local machine unless the dataset subset is intentionally small.
+Local verification should stay lightweight and code-focused. Do not run training, evaluation, long data-packing jobs, or output-producing experiment commands on the local machine.
 
 ## Commit & Pull Request Guidelines
 Use concise imperative commits, for example `Update AGENTS for baseline dataset project`. Pull requests should include a summary, commands run, dataset assumptions, and any relevant tensor-shape or frame-count output. Do not commit generated datasets, virtual environments, or machine-specific paths.
@@ -88,3 +90,5 @@ After each project modification, commit the change and push it to the configured
 Before changing code, apply the `karpathy-guidelines` skill: state assumptions when needed, prefer the smallest working change, avoid unrelated refactors, and verify the result with a concrete check.
 
 Before running project code or tests, activate the existing Conda environment with `conda activate WiFiPose` to ensure commands run in the established project environment.
+
+Use this repository checkout only for code edits and lightweight code verification. For any future model training, validation, evaluation, visualization, metrics export, checkpoint export, or dataset/output generation, commit and push the code first, then run those commands only on the Linux server after `git pull`.
