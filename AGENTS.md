@@ -2,16 +2,16 @@
 
 ## Project Structure & Module Organization
 - `dataloader.py`: Core module for discovering raw MM-Fi samples, validating frame alignment, building split indices, cleaning CSI features, packing one HDF5 dataset, loading HDF5 splits, creating PyTorch `DataLoader` instances, and previewing split contents.
-- `models/csi2pose.py`: CSI2Pose v1 model that encodes CSI windows with a per-frame CNN, temporal TCN blocks, COCO17 joint queries, heatmap prediction, and soft-argmax coordinate decoding.
+- `models/csi2pose.py`: CSI2Pose model family that encodes CSI windows with a shared per-frame CNN and temporal TCN backbone, then predicts COCO17 keypoints with either a heatmap decoder or a direct-regression decoder.
 - `metrics.py`: PCK@5/10/20/50 computation in restored pixel-coordinate space, including overall and per-joint COCO17 scores.
 - `train.py`: Server-side training entrypoint with tqdm progress, AMP support, best-checkpoint selection by validation PCK@20, and final test evaluation.
 - `test.py`: Server-side checkpoint evaluation entrypoint for train, val, or test splits.
-- `configs/csi2pose_tcn.yaml`: Default CSI2Pose v1 experiment configuration.
+- `configs/csi2pose_tcn.yaml`: Default CSI2Pose experiment configuration with decoder-specific settings for `heatmap` and `regression`.
 - `scripts/build_h5_dataset.py`: Command-line wrapper that packs the raw MM-Fi directory tree into one `.h5` or `.hdf5` dataset file.
-- `tests/`: `pytest` tests for HDF5-backed dataset loading, sequence-window construction, model forward shapes, heatmap target construction, PCK metrics, and CLI parsing.
+- `tests/`: `pytest` tests for HDF5-backed dataset loading, sequence-window construction, decoder forward shapes, heatmap target construction, decoder-specific losses, skeleton prior losses, PCK metrics, and CLI parsing.
 - `.gitignore`: Excludes Python caches, pytest caches, local packed data, and generated experiment outputs.
 
-This repository is now a small MM-Fi CSI-to-pose baseline project. It contains data preparation/loading utilities plus a frozen, reproducible CSI2Pose v1 training baseline. The baseline predicts COCO17 2D keypoints from CSI amplitude and bounded phase features using a heatmap-based decoder rather than direct unstructured coordinate regression.
+This repository is now a small MM-Fi CSI-to-pose baseline project. It contains data preparation/loading utilities plus reproducible CSI2Pose training baselines. The training and test entrypoints support `--decoder heatmap` for the historical heatmap baseline and `--decoder regression` for the current direct-regression baseline. Both decoders use the same CSI backbone and COCO17 joint-query features, and both include train-split skeleton prior losses for body-bone length ratios and joint-angle cosines.
 
 Use the current local checkout for code modification only. Do not run training, evaluation, long data packing, visualization generation, checkpoint export, or any experiment-output generation on this machine. All training runs and all generated outputs must be produced on the Linux server after the server pulls the latest code with `git pull`.
 
@@ -30,7 +30,7 @@ The repository currently uses these physical features:
 - `csi_phase`: cleaned CSI phase. The pipeline interpolates non-finite subcarrier values, unwraps phase along the subcarrier axis, and removes the per-antenna linear trend.
 - `csi_phase_cos`: cosine-transformed cleaned phase for a bounded phase feature.
 
-The dataset loaders expose both frame-level records and contiguous sequence windows. Sequence-window construction reads HDF5 metadata in bulk before grouping frames, because per-frame HDF5 string reads are too slow for the full packed dataset. The CSI2Pose v1 model consumes sequence windows and predicts every frame in the window; downstream visualization should use the middle frame when only one representative pose is needed.
+The dataset loaders expose both frame-level records and contiguous sequence windows. Sequence-window construction reads HDF5 metadata in bulk before grouping frames, because per-frame HDF5 string reads are too slow for the full packed dataset. CSI2Pose decoder models consume sequence windows and predict every frame in the window; downstream visualization should use the middle frame when only one representative pose is needed.
 
 One packed HDF5 stores:
 - frame-level `keypoints`, `csi_amplitude`, `csi_phase`, `csi_phase_cos`
@@ -73,18 +73,24 @@ Run lightweight local verification:
 pytest
 ```
 
-Train CSI2Pose v1 only on the Linux server after pulling the latest code:
+Train CSI2Pose direct regression only on the Linux server after pulling the latest code:
 
 ```bash
-python train.py --config configs/csi2pose_tcn.yaml --dataset-root /path/to/mmfi_pose.h5
+python train.py --config configs/csi2pose_tcn.yaml --dataset-root /path/to/mmfi_pose.h5 --decoder regression
+```
+
+Train the historical heatmap decoder only on the Linux server:
+
+```bash
+python train.py --config configs/csi2pose_tcn.yaml --dataset-root /path/to/mmfi_pose.h5 --decoder heatmap
 ```
 
 During startup, `train.py` prints window-building progress for each split. It builds train and validation windows before training, then delays test-window construction until the best checkpoint is ready for final evaluation.
 
-Evaluate a saved CSI2Pose checkpoint only on the Linux server:
+Evaluate a saved CSI2Pose checkpoint only on the Linux server, using the same decoder that created the checkpoint:
 
 ```bash
-python test.py --config configs/csi2pose_tcn.yaml --dataset-root /path/to/mmfi_pose.h5 --checkpoint runs/csi2pose_tcn/best.pt
+python test.py --config configs/csi2pose_tcn.yaml --dataset-root /path/to/mmfi_pose.h5 --decoder regression --checkpoint runs/csi2pose_regression_tcn/best.pt
 ```
 
 ## Coding Style & Naming Conventions

@@ -1,5 +1,4 @@
 seed: 42
-run_dir: runs/csi2pose_tcn
 
 data:
   split_scheme: action_env
@@ -11,13 +10,6 @@ model:
   temporal_layers: 3
   temporal_kernel_size: 3
   dropout: 0.1
-  heatmap_size: 64
-  softargmax_temperature: 0.05
-
-loss:
-  coordinate_weight: 1.0
-  heatmap_weight: 0.1
-  heatmap_sigma: 1.5
 
 metrics:
   pck_thresholds: [5, 10, 20, 50]
@@ -31,3 +23,23 @@ train:
   amp: true
   num_workers: 4
   pin_memory: true
+
+decoders:
+  heatmap:
+    run_dir: runs/csi2pose_heatmap_tcn
+    model:
+      heatmap_size: 64
+      softargmax_temperature: 0.05
+    loss:
+      coordinate_weight: 1.0
+      heatmap_weight: 0.1
+      heatmap_sigma: 1.5
+      bone_weight: 0.05
+      angle_weight: 0.02
+
+  regression:
+    run_dir: runs/csi2pose_regression_tcn
+    loss:
+      coordinate_weight: 1.0
+      bone_weight: 0.05
+      angle_weight: 0.02
