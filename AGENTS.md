@@ -86,7 +86,7 @@ Train the historical heatmap decoder only on the Linux server:
 python train.py --config configs/csi2pose_tcn.yaml --dataset-root /path/to/mmfi_pose.h5 --decoder heatmap
 ```
 
-During startup, `train.py` prints window-building progress for each split. It builds train and validation windows before training, then delays test-window construction until the best checkpoint is ready for final evaluation.
+During startup, `train.py` prints window-building progress for each split. It builds train and validation windows before training, then delays test-window construction until the best checkpoint is ready for final evaluation. Training progress bars should stay compact: show only running loss during train/evaluate loops, then print one epoch summary with train loss, validation loss, validation PCK@20, and best validation PCK@20. Keep detailed loss components and per-joint PCK in `metrics.json` instead of the console log.
 
 Evaluate a saved CSI2Pose checkpoint only on the Linux server, using the same decoder that created the checkpoint:
 

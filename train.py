@@ -373,6 +373,26 @@ def compute_loss(
     return total_loss, loss_items
 
 
+def format_epoch_summary(
+    epoch: int,
+    train_metrics: dict[str, Any],
+    val_metrics: dict[str, Any],
+    best_score: float,
+    saved_best: bool,
+) -> str:
+    """Return the compact per-epoch training summary shown in server logs."""
+
+    suffix = " saved_best=True" if saved_best else ""
+    return (
+        f"epoch={epoch} "
+        f"train_loss={float(train_metrics['loss']):.6f} "
+        f"val_loss={float(val_metrics['loss']):.6f} "
+        f"val_pck@20={float(val_metrics['pck@20']):.6f} "
+        f"best_val_pck@20={best_score:.6f}"
+        f"{suffix}"
+    )
+
+
 def train_one_epoch(
     model: torch.nn.Module,
     loader: DataLoader,
@@ -409,7 +429,7 @@ def train_one_epoch(
 
         for name, value in loss_items.items():
             totals[name] = totals.get(name, 0.0) + value
-        progress.set_postfix({name: totals[name] / step for name in totals})
+        progress.set_postfix({"loss": totals["loss"] / step})
 
     return {name: value / max(len(loader), 1) for name, value in totals.items()}
 
@@ -445,7 +465,7 @@ def evaluate(
         accumulator.update(outputs["keypoints"], batch["keypoints"])
         for name, value in loss_items.items():
             totals[name] = totals.get(name, 0.0) + value
-        progress.set_postfix({name: totals[name] / step for name in totals})
+        progress.set_postfix({"loss": totals["loss"] / step})
 
     metrics = {name: value / max(len(loader), 1) for name, value in totals.items()}
     metrics.update(accumulator.compute())
@@ -522,8 +542,10 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         epoch_metrics = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
         history.append(epoch_metrics)
         val_score = float(val_metrics["pck@20"])
+        saved_best = False
         if val_score > best_score:
             best_score = val_score
+            saved_best = True
             save_checkpoint(
                 best_checkpoint,
                 model,
@@ -533,6 +555,16 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 config=config,
                 skeleton_prior=skeleton_prior,
             )
+        print(
+            format_epoch_summary(
+                epoch,
+                train_metrics=train_metrics,
+                val_metrics=val_metrics,
+                best_score=best_score,
+                saved_best=saved_best,
+            ),
+            flush=True,
+        )
 
     checkpoint = torch.load(best_checkpoint, map_location=device)
     load_model_state(model, checkpoint["model_state_dict"], decoder=args.decoder)

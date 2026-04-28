@@ -13,6 +13,7 @@ from train import (
     activate_decoder_config,
     build_target_heatmaps,
     compute_loss,
+    format_epoch_summary,
 )
 from visualization import save_pose_comparison, select_one_frame_per_action_env_sample
 
@@ -157,6 +158,23 @@ def test_train_parser_accepts_decoder_args() -> None:
     assert heatmap_args.decoder == "heatmap"
     assert args.config == "configs/csi2pose_tcn.yaml"
     assert args.dataset_root == "data/mmfi_pose.h5"
+
+
+def test_epoch_summary_reports_core_training_metrics() -> None:
+    summary = format_epoch_summary(
+        2,
+        train_metrics={"loss": 0.1234567, "coordinate_loss": 0.9},
+        val_metrics={"loss": 0.2345678, "pck@20": 0.3456789, "bone_prior_loss": 1.0},
+        best_score=0.3456789,
+        saved_best=True,
+    )
+
+    assert summary == (
+        "epoch=2 train_loss=0.123457 val_loss=0.234568 "
+        "val_pck@20=0.345679 best_val_pck@20=0.345679 saved_best=True"
+    )
+    assert "coordinate_loss" not in summary
+    assert "bone_prior_loss" not in summary
 
 
 def test_test_parser_accepts_decoder_args() -> None:
