@@ -11,7 +11,7 @@
 - `tests/`: `pytest` tests for HDF5-backed dataset loading, sequence-window construction, model forward shapes, heatmap target construction, PCK metrics, and CLI parsing.
 - `.gitignore`: Excludes Python caches, pytest caches, local packed data, and generated experiment outputs.
 
-This repository is now a small MM-Fi CSI-to-pose baseline project. It contains data preparation/loading utilities plus a first CSI2Pose v1 training baseline. The baseline predicts COCO17 2D keypoints from CSI amplitude and bounded phase features using a heatmap-based decoder rather than direct unstructured coordinate regression.
+This repository is now a small MM-Fi CSI-to-pose baseline project. It contains data preparation/loading utilities plus a frozen, reproducible CSI2Pose v1 training baseline. The baseline predicts COCO17 2D keypoints from CSI amplitude and bounded phase features using a heatmap-based decoder rather than direct unstructured coordinate regression.
 
 Use the current local checkout for code modification only. Do not run training, evaluation, long data packing, visualization generation, checkpoint export, or any experiment-output generation on this machine. All training runs and all generated outputs must be produced on the Linux server after the server pulls the latest code with `git pull`.
 
@@ -38,6 +38,10 @@ One packed HDF5 stores:
 - split indices for both `action_env` and `frame_random`
 - train-split normalization statistics in HDF5 attributes
 
+Use `action_env` as the primary experimental split for reproducible baseline reporting. The `frame_random` split is available for inspection or sanity checks, but it should not be treated as the main generalization result because it can mix frames from the same sequence across splits.
+
+Keypoint normalization intentionally uses train-split coordinate scales stored in the HDF5 attributes. Do not replace this with image-size constants or validation/test-derived statistics unless a new experiment design explicitly changes the normalization protocol; the current baseline avoids introducing image metadata or held-out split priors into normalization.
+
 ## Build, Inspection, and Development Commands
 Use the existing Conda environment for project commands:
 
@@ -62,8 +66,6 @@ Inspect the alternate frame-random split scheme:
 ```powershell
 python dataloader.py --dataset-root data\mmfi_pose.h5 --split-scheme frame_random --preview
 ```
-
-There is no training or evaluation command in the current cleaned project. Add those entrypoints only after a new experiment design is explicitly chosen.
 
 Run lightweight local verification:
 
