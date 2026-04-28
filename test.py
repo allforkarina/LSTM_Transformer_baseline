@@ -22,6 +22,7 @@ from train import (
     skeleton_prior_from_state,
     skeleton_prior_to_device,
 )
+from visualization import save_visualization_samples
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -31,6 +32,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", type=str, required=True, help="Checkpoint created by train.py")
     parser.add_argument("--decoder", type=str, default=DEFAULT_DECODER, choices=DECODER_NAMES, help="Decoder to test")
     parser.add_argument("--split", type=str, default="test", choices=("train", "val", "test"), help="Split to evaluate")
+    parser.add_argument("--visualize", action="store_true", help="Save GT/prediction pose comparison figures")
+    parser.add_argument(
+        "--visualization-dir",
+        type=str,
+        default=None,
+        help="Directory for visualization PNGs; defaults to checkpoint_dir/visualizations/split",
+    )
+    parser.add_argument(
+        "--visualization-seed",
+        type=int,
+        default=None,
+        help="Seed for selecting one representative frame per action/environment/sample",
+    )
     return parser
 
 
@@ -52,6 +66,21 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         train_loader = make_sequence_loader(args.dataset_root, "train", config=config, shuffle=False)
         skeleton_prior = skeleton_prior_to_device(build_skeleton_prior(train_loader.dataset), device=device)
     metrics = evaluate(model, loader, device, config, skeleton_prior=skeleton_prior)
+    if args.visualize:
+        visualization_dir = (
+            Path(args.visualization_dir)
+            if args.visualization_dir is not None
+            else Path(args.checkpoint).parent / "visualizations" / args.split
+        )
+        visualization_seed = int(args.visualization_seed if args.visualization_seed is not None else config["seed"])
+        saved_paths = save_visualization_samples(
+            model,
+            loader.dataset,
+            device=device,
+            output_dir=visualization_dir,
+            seed=visualization_seed,
+        )
+        print(f"Saved {len(saved_paths)} visualizations to {visualization_dir}")
     print(json.dumps(metrics, indent=2))
     return metrics
 

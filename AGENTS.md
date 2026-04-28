@@ -5,10 +5,11 @@
 - `models/csi2pose.py`: CSI2Pose model family that encodes CSI windows with a shared per-frame CNN and temporal TCN backbone, then predicts COCO17 keypoints with either a heatmap decoder or a direct-regression decoder.
 - `metrics.py`: PCK@5/10/20/50 computation in restored pixel-coordinate space, including overall and per-joint COCO17 scores.
 - `train.py`: Server-side training entrypoint with tqdm progress, AMP support, best-checkpoint selection by validation PCK@20, and final test evaluation.
-- `test.py`: Server-side checkpoint evaluation entrypoint for train, val, or test splits.
+- `test.py`: Server-side checkpoint evaluation entrypoint for train, val, or test splits, with optional GT/prediction pose visualization.
+- `visualization.py`: Server-side pose comparison utilities that sample one representative frame per action/environment/sample group and save GT, prediction, and overlay plots in pixel-coordinate space.
 - `configs/csi2pose_tcn.yaml`: Default CSI2Pose experiment configuration with decoder-specific settings for `heatmap` and `regression`.
 - `scripts/build_h5_dataset.py`: Command-line wrapper that packs the raw MM-Fi directory tree into one `.h5` or `.hdf5` dataset file.
-- `tests/`: `pytest` tests for HDF5-backed dataset loading, sequence-window construction, decoder forward shapes, heatmap target construction, decoder-specific losses, skeleton prior losses, PCK metrics, and CLI parsing.
+- `tests/`: `pytest` tests for HDF5-backed dataset loading, sequence-window construction, decoder forward shapes, heatmap target construction, decoder-specific losses, skeleton prior losses, PCK metrics, visualization helpers, and CLI parsing.
 - `.gitignore`: Excludes Python caches, pytest caches, local packed data, and generated experiment outputs.
 
 This repository is now a small MM-Fi CSI-to-pose baseline project. It contains data preparation/loading utilities plus reproducible CSI2Pose training baselines. The training and test entrypoints support `--decoder heatmap` for the historical heatmap baseline and `--decoder regression` for the current direct-regression baseline. Both decoders use the same CSI backbone and COCO17 joint-query features, and both include train-split skeleton prior losses for body-bone length ratios and joint-angle cosines.
@@ -92,6 +93,14 @@ Evaluate a saved CSI2Pose checkpoint only on the Linux server, using the same de
 ```bash
 python test.py --config configs/csi2pose_tcn.yaml --dataset-root /path/to/mmfi_pose.h5 --decoder regression --checkpoint runs/csi2pose_regression_tcn/best.pt
 ```
+
+Save GT/prediction pose comparison PNGs during server-side checkpoint evaluation:
+
+```bash
+python test.py --config configs/csi2pose_tcn.yaml --dataset-root /path/to/mmfi_pose.h5 --decoder regression --checkpoint runs/csi2pose_regression_tcn/best.pt --visualize
+```
+
+Visualization samples one middle frame from a randomly selected sequence window for each `(action, environment, sample)` group in the evaluated split. Keypoints are restored to pixel-coordinate scale before plotting. By default images are written under the checkpoint directory at `visualizations/<split>/`; use `--visualization-dir` and `--visualization-seed` to override the output location or sampling seed on the Linux server.
 
 ## Coding Style & Naming Conventions
 Use Python 3.10+ syntax, type hints, and `pathlib.Path` for paths. Group imports as standard library, third-party, then local. Follow existing naming: `snake_case` functions and variables, `PascalCase` classes, and uppercase constants such as `SPLIT_NAMES` or `CSI_SHAPE`. Use 4-space indentation. Keep comments focused on dataset assumptions, tensor shapes, alignment constraints, and normalization or cleaning behavior.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import h5py
+import numpy as np
 import torch
 
 import test as test_script
@@ -12,6 +14,7 @@ from train import (
     build_target_heatmaps,
     compute_loss,
 )
+from visualization import save_pose_comparison, select_one_frame_per_action_env_sample
 
 
 def _base_config() -> dict:
@@ -163,9 +166,66 @@ def test_test_parser_accepts_decoder_args() -> None:
             "data/mmfi_pose.h5",
             "--checkpoint",
             "runs/csi2pose_regression_tcn/best.pt",
+            "--visualize",
+            "--visualization-dir",
+            "runs/visualizations",
+            "--visualization-seed",
+            "7",
         ]
     )
 
     assert args.decoder == "regression"
     assert args.split == "test"
     assert args.checkpoint == "runs/csi2pose_regression_tcn/best.pt"
+    assert args.visualize is True
+    assert args.visualization_dir == "runs/visualizations"
+    assert args.visualization_seed == 7
+
+
+def test_visualization_selection_samples_one_middle_frame_per_group(tmp_path) -> None:
+    dataset_path = tmp_path / "mini.h5"
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    with h5py.File(dataset_path, "w") as h5_file:
+        h5_file.create_dataset("action", data=np.asarray(["A01", "A01", "A01", "A01"], dtype=object), dtype=string_dtype)
+        h5_file.create_dataset("sample", data=np.asarray(["S01", "S01", "S02", "S02"], dtype=object), dtype=string_dtype)
+        h5_file.create_dataset(
+            "environment",
+            data=np.asarray(["env1", "env1", "env1", "env1"], dtype=object),
+            dtype=string_dtype,
+        )
+        h5_file.create_dataset(
+            "frame_id",
+            data=np.asarray(["frame001", "frame002", "frame001", "frame002"], dtype=object),
+            dtype=string_dtype,
+        )
+
+    class FakeDataset:
+        dataset_root = dataset_path
+        windows = [(0, 1), (2, 3)]
+
+    selected = select_one_frame_per_action_env_sample(FakeDataset(), seed=42)
+
+    assert len(selected) == 2
+    assert {(frame.action, frame.environment, frame.sample) for frame in selected} == {
+        ("A01", "env1", "S01"),
+        ("A01", "env1", "S02"),
+    }
+    assert {frame.frame_id for frame in selected} == {"frame002"}
+
+
+def test_pose_comparison_visualization_denormalizes_and_saves(tmp_path) -> None:
+    keypoints = torch.zeros(17, 2)
+    keypoints[:, 0] = torch.linspace(0.1, 0.9, 17)
+    keypoints[:, 1] = torch.linspace(0.2, 0.8, 17)
+    output_path = tmp_path / "pose.png"
+
+    save_pose_comparison(
+        gt_keypoints=keypoints,
+        predicted_keypoints=keypoints + 0.01,
+        x_scale=100.0,
+        y_scale=200.0,
+        output_path=output_path,
+    )
+
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
